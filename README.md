@@ -29,12 +29,25 @@ That is why a token-level proxy can clear it and a task eval cannot.
 
 ## Usage
 
+As a GitHub Action:
+
 ```yaml
 - uses: DawnofGenX/quant-regress@v1
   with:
     eval: evals/tasks.jsonl
     model: meta-llama/Llama-3.2-1B-Instruct
     max-drop-points: 2
+```
+
+Or from the command line / your own CI:
+
+```bash
+pip install quant-regress
+
+quant-regress --eval evals/tasks.jsonl \
+              --model meta-llama/Llama-3.2-1B-Instruct \
+              --max-drop-points 2 \
+              --report quant-regress-report.json
 ```
 
 Exit codes: `0` within tolerance, `1` accuracy regressed, `2` bad configuration.
