@@ -6,3 +6,17 @@ build/
 *.egg-info/
 .pytest_cache/
 results/
+
+# Secrets and local credentials — never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+.pypirc
+.netrc
+credentials.json
+
+# Local agent/plan state
+.hermes/
