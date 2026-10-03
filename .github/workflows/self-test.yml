@@ -5,20 +5,64 @@ on:
   pull_request:
 
 jobs:
-  action:
+  gate-contract:
+    name: gate contract (exit codes)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run quant-regress against the collapse fixture (must FAIL)
-        id: gate
-        continue-on-error: true
-        uses: ./
+
+      - uses: actions/setup-python@v5
         with:
-          eval: evals/fixtures/collapse.jsonl
-          model: sshleifer/tiny-gpt2
-          max-drop-points: "2"
-      - name: The gate must have failed — otherwise it is not testing anything
-        if: steps.gate.outcome == 'success'
+          python-version: "3.12"
+
+      - name: Install
         run: |
-          echo "::error::quant-regress did not fail on a fixture built to regress."
-          exit 1
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch>=2.0
+          pip install -e ".[dev]"
+
+      # The exit-code contract is what other people's CI depends on: 0 when
+      # accuracy holds, 1 on a regression, 2 on bad configuration. These tests
+      # pin all three, including "misconfigured must never exit 0".
+      - name: Pin the exit-code contract
+        run: python -m pytest tests/test_selftest_gate.py tests/test_cli.py -v
+
+  action-container:
+    name: action container builds and runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build the published Dockerfile itself, so a broken image is caught here
+      # rather than by the first person who references the action.
+      - name: Build the action image
+        run: docker build -t quant-regress:local .
+
+      # Real-model smoke test. NOTE: this asserts the container BUILDS and the
+      # CLI runs end to end — it does NOT assert a regression, because whether a
+      # given model regresses on a given fixture is a property of that model, not
+      # of this action. The previous version of this job asserted a failure
+      # using sshleifer/tiny-gpt2 and was unsound: an untuned tiny LM answers
+      # nothing with "yes", so it scored 0/N at both precisions, produced no
+      # drop, and the gate correctly passed. That assertion would have failed CI
+      # on correct behaviour.
+      - name: Smoke-test the CLI inside the image
+        run: |
+          set +e
+          docker run --rm -v "$PWD/evals:/evals:ro" quant-regress:local \
+            /evals/fixtures/collapse.jsonl sshleifer/tiny-gpt2 int8 2 /tmp/report.json ""
+          echo "container exit: $? (any code is valid here — the point is that it runs)"
+          set -e
+
+      - name: Confirm a usage error is reported, not swallowed
+        run: |
+          set +e
+          docker run --rm -v "$PWD/evals:/evals:ro" quant-regress:local \
+            /evals/fixtures/collapse.jsonl "" int8 2 /tmp/report.json ""
+          rc=$?
+          set -e
+          echo "missing-model exit: $rc"
+          if [ "$rc" -ne 2 ]; then
+            echo "::error::expected exit 2 for a missing model, got $rc"
+            exit 1
+          fi

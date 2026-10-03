@@ -56,5 +56,13 @@ Exit codes: `0` within tolerance, `1` accuracy regressed, `2` bad configuration.
 - Only `fp32` and dynamic `int8` are supported in v1.
 - The library runs generation, so it needs a task whose success is checkable in
   code. It is not an LLM-judge harness.
+- **The bundled `evals/fixtures/collapse.jsonl` is model-specific.** Its cases
+  expect the answer `yes`, so it only demonstrates a collapse for a model that
+  answers `yes` when unquantized. Pointed at an untuned tiny LM it scores 0/N at
+  both precisions, produces no drop, and the gate correctly reports PASS. Use it
+  to see the output format; bring your own eval for a real check.
+- What the repo's own CI pins is the **exit-code contract** (0 holds, 1 regressed,
+  2 misconfigured), not any particular model's accuracy — see
+  `tests/test_selftest_gate.py`.
 - No published adoption yet. If you use it, an issue saying what you quantized
   and what broke is genuinely useful.
