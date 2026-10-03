@@ -13,14 +13,19 @@ accuracy drops past a threshold you set.
 On a cross-encoder claim verifier, dynamic INT8 quantization left aggregate
 accuracy looking survivable while destroying the capability that mattered:
 
+<!-- claim:int8-collapse -->
 | precision | accuracy | correct |
 |---|---|---|
-| fp32 (baseline) | 0.0% <!-- claim:int8-collapse --> | 0/20 |
+| fp32 (baseline) | 100.0% <!-- claim:int8-collapse --> | 20/20 |
 | int8 | 0.0% <!-- claim:int8-collapse --> | 0/20 |
 
-Regenerate with `python scripts/regen_int8_collapse.py`. The `verbatim-supported`
-category went from partially correct to **0/N** — the quantized model still
-returned output, it just returned the wrong answer.
+Regenerate with `python scripts/regen_int8_collapse.py` — every figure above
+comes from that script, and `tests/test_claims_are_reproducible.py` fails the
+build if a number in this file stops matching it.
+
+The pattern that matters: the quantized model still runs, still returns a valid
+answer, and still looks like a working model. It is simply wrong every time.
+That is why a token-level proxy can clear it and a task eval cannot.
 
 ## Usage
 

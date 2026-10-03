@@ -25,6 +25,11 @@ class _CollapseModel:
     Mirrors the measured citesure result in shape — the quantized model still
     runs and still returns output, but the decision is wrong — so the gate has
     something real to catch in its own CI.
+
+    It answers text via ``answer()``. It does NOT return logits: a logit is not
+    an answer, and stringifying one can never equal ``"yes"``. An earlier
+    version of this script returned logits and scored 0% at BOTH precisions,
+    which made the gate report PASS on a fixture built to regress.
     """
 
     def __init__(self, precision: str):
@@ -33,10 +38,10 @@ class _CollapseModel:
     def eval(self):
         return self
 
-    def __call__(self, **kw):
-        # FP32 -> confident yes (correct); INT8 -> confident no (wrong).
-        score = 0.95 if self.precision == "fp32" else 0.05
-        return type("O", (), {"logits": [[score, 1.0 - score]]})()
+    def answer(self, prompt: str) -> str:
+        # FP32 -> correct; INT8 -> confidently wrong, which is the real shape of
+        # the failure: the model still returns a valid answer, just the wrong one.
+        return "yes" if self.precision == "fp32" else "no"
 
 
 def main() -> int:
