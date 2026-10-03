@@ -1,0 +1,24 @@
+name: self-test
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run quant-regress against the collapse fixture (must FAIL)
+        id: gate
+        continue-on-error: true
+        uses: ./
+        with:
+          eval: evals/fixtures/collapse.jsonl
+          model: sshleifer/tiny-gpt2
+          max-drop-points: "2"
+      - name: The gate must have failed — otherwise it is not testing anything
+        if: steps.gate.outcome == 'success'
+        run: |
+          echo "::error::quant-regress did not fail on a fixture built to regress."
+          exit 1

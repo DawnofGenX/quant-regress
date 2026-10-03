@@ -1,0 +1,41 @@
+name: "quant-regress"
+description: "Fail CI when quantization costs you task accuracy."
+author: "DawnofGenX"
+branding:
+  icon: "alert-triangle"
+  color: "red"
+
+inputs:
+  eval:
+    description: "Path to a JSONL task eval set (id, prompt, expected)."
+    required: true
+  model:
+    description: "HuggingFace model id, e.g. meta-llama/Llama-3.2-1B-Instruct."
+    required: true
+  precisions:
+    description: "Comma-separated candidate precisions."
+    required: false
+    default: "int8"
+  max-drop-points:
+    description: "Fail if accuracy drops more than this many points."
+    required: false
+    default: "2"
+  report-path:
+    description: "Where to write the JSON report."
+    required: false
+    default: "quant-regress-report.json"
+  cache-dir:
+    description: "Optional HF cache directory."
+    required: false
+    default: ""
+
+runs:
+  using: "docker"
+  image: "Dockerfile"
+  args:
+    - ${{ inputs.eval }}
+    - ${{ inputs.model }}
+    - ${{ inputs.precisions }}
+    - ${{ inputs.max-drop-points }}
+    - ${{ inputs.report-path }}
+    - ${{ inputs.cache-dir }}
