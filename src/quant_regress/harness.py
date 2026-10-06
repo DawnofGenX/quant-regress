@@ -177,20 +177,40 @@ class QuantHarness:
         Shape 3 deliberately does NOT stringify the raw logit. A logit is not an
         answer: ``str(0.95)`` can never equal ``"yes"``, so stringifying it made
         every such model score 0% and silently defeated the regression gate.
+
+        On shape 1 only the CONTINUATION is decoded. ``generate()`` returns the
+        input ids followed by the new ones, so decoding the whole tensor returns
+        the prompt as the model's "answer" — measured: prompting
+        ``"The capital of France is"`` decoded to
+        ``"The capital of France is is us us us us us"``. With a system prompt
+        configured, the leak is worse: the system prompt is returned too, so the
+        prediction is the instruction rather than the answer. Under exact-match
+        scoring that is not a cosmetic defect — it makes the generate path
+        unsatisfiable, every case scores 0 at every precision, and the gate
+        reports a 0.00-point drop and PASSes a model it never measured.
+
+        Whether the continuation is *enough* to match is the eval-set author's
+        call, not this function's: a prompt asking for a one-word answer and an
+        ``expected`` of ``"Paris"`` now works, and a chatty model can still be
+        matched by passing a custom ``scorer``.
         """
         # 2. explicit text answer
         answer = getattr(model, "answer", None)
         if callable(answer):
             return str(answer(prompt))
 
-        # 1. real HF generation path
+        # 1. real HF generation path — continuation only
         if tok is not None and hasattr(model, "generate"):
             text = prompt if self.system_prompt is None else f"{self.system_prompt}\n{prompt}"
             inputs = tok(text, return_tensors="pt")
             inputs = {k: v.to(getattr(model, "device", "cpu")) for k, v in inputs.items()}
             out = model.generate(**inputs, max_new_tokens=self.max_new_tokens,
                                  do_sample=False)
-            return tok.decode(out[0], skip_special_tokens=True)
+            n_prompt = int(inputs["input_ids"].shape[-1])
+            new_ids = out[0][n_prompt:]
+            if new_ids.numel() == 0:
+                return ""
+            return tok.decode(new_ids, skip_special_tokens=True)
 
         # 3. logits -> label
         logits = model(**{"input_ids": [[1]], "attention_mask": [[1]]}).logits

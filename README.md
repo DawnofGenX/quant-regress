@@ -58,6 +58,22 @@ Exit codes: `0` within tolerance, `1` accuracy regressed, `2` bad configuration.
   model to CUDA raises at forward time. GitHub-hosted runners have no GPU, so
   this is not a limitation in CI — but it does mean GPU-only quantizers
   (AWQ/GPTQ/GGUF) are out of scope for v1.
+- **Not every architecture can be quantized by this method, and the action
+  refuses rather than lying.** `quantize_dynamic` only replaces module types in
+  torch's own mapping table, which covers `nn.Linear`. Architectures whose
+  blocks use something else — GPT-2 and GPT-J use `transformers.Conv1D` — would
+  have their transformer body left in fp32, so the "int8" arm would really be
+  fp32 and the tool would report a **0.00-point drop and PASS** for a model it
+  never quantized. That architecture now exits `2` (misconfigured) with an
+  actionable message instead. Use an `nn.Linear`-based architecture:
+  BERT, DeBERTa, Llama, Mistral.
+- **Only the model's continuation is scored.** `generate()` returns the prompt
+  followed by the new tokens, so the prediction is what the model added — not
+  the question you asked it. Prompts should ask for a short, exact answer, and
+  `expected` should be that answer. A chatty model will not exact-match: pass a
+  custom scorer via `QuantHarness(..., scorer=fn)` when using the library. (There
+  is no `--scorer` flag on the CLI yet; from the command line the default
+  exact-after-normalisation comparison is what you get.)
 - **The threshold unit is accuracy points**, not a ratio. `--max-drop-points: 2`
   means "fail if any candidate is more than 2 points below the baseline".
 - Comparison is exact-after-normalisation by default. Pass a scorer if you need
@@ -69,11 +85,17 @@ Exit codes: `0` within tolerance, `1` accuracy regressed, `2` bad configuration.
 - Only `fp32` and dynamic `int8` are supported in v1.
 - The library runs generation, so it needs a task whose success is checkable in
   code. It is not an LLM-judge harness.
-- **The bundled `evals/fixtures/collapse.jsonl` is model-specific.** Its cases
-  expect the answer `yes`, so it only demonstrates a collapse for a model that
-  answers `yes` when unquantized. Pointed at an untuned tiny LM it scores 0/N at
-  both precisions, produces no drop, and the gate correctly reports PASS. Use it
-  to see the output format; bring your own eval for a real check.
+- **The bundled `evals/fixtures/collapse.jsonl` is model-specific, and it does
+  not exercise the generate path.** Its cases expect the answer `yes`, so it only
+  demonstrates a collapse for a model that answers `yes` when unquantized.
+  Pointed at an untuned tiny LM it scores 0/N at both precisions, produces no
+  drop, and the gate correctly reports PASS. It is also driven by a stub model
+  exposing `.answer()`, so it tells you nothing about real decoding. Use it to
+  see the output format; bring your own eval for a real check.
+- A model that is quiet at both precisions yields a 0.00-point drop and PASSes.
+  The gate reports *change*, not *quality*: if your baseline model is already
+  wrong, quant-regress will not tell you. Check the baseline accuracy in the
+  report before trusting a PASS.
 - What the repo's own CI pins is the **exit-code contract** (0 holds, 1 regressed,
   2 misconfigured), not any particular model's accuracy — see
   `tests/test_selftest_gate.py`.
