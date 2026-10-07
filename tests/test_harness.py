@@ -150,6 +150,81 @@ def test_unsupported_precision_is_rejected(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# A gate that cannot fail is worse than no gate. Each of these was MEASURED to
+# let a real 100-point INT8 regression through (or to invert it), silently.
+# --------------------------------------------------------------------------
+
+
+def test_nan_threshold_is_rejected_because_it_always_passes(tmp_path):
+    """`worst_drop > nan` is False for every drop, so PASS always wins."""
+    es = _eval(tmp_path, n=4)
+
+    def factory(precision):
+        return _FakeModel(precision, correct=(precision == "fp32"))
+
+    h = QuantHarness(model_factory=factory)
+    with pytest.raises(ValueError, match="NaN"):
+        h.compare(es, candidate_precisions=["int8"], max_drop_points=float("nan"))
+
+
+def test_infinite_threshold_is_rejected_because_it_always_passes(tmp_path):
+    """No finite drop can exceed +inf, so the gate would never fail."""
+    es = _eval(tmp_path, n=4)
+    h = QuantHarness(model_factory=lambda p: _FakeModel(p, correct=(p == "fp32")))
+    with pytest.raises(ValueError, match="inf"):
+        h.compare(es, candidate_precisions=["int8"], max_drop_points=float("inf"))
+
+
+def test_negative_threshold_is_rejected_because_it_inverts_the_gate(tmp_path):
+    """A negative threshold makes the test 'the quantized model must be worse'.
+
+    That PASSes a 100-point collapse and FAILs a healthy quantized model -- the
+    opposite of a gate. Verified: before the fix, -1.0 returned FAIL for the
+    collapse, i.e. it would have failed the build for the wrong reason.
+    """
+    es = _eval(tmp_path, n=4)
+    h = QuantHarness(model_factory=lambda p: _FakeModel(p, correct=(p == "fp32")))
+    with pytest.raises(ValueError, match=">= 0"):
+        h.compare(es, candidate_precisions=["int8"], max_drop_points=-1.0)
+
+
+def test_zero_threshold_is_allowed_and_fails_on_any_regression(tmp_path):
+    """0 is coherent policy -- "any regression fails" -- so it must be accepted."""
+    es = _eval(tmp_path, n=4)
+    h = QuantHarness(model_factory=lambda p: _FakeModel(p, correct=(p == "fp32")))
+    res = h.compare(es, candidate_precisions=["int8"], max_drop_points=0.0)
+    assert res.verdict is Verdict.FAIL
+
+
+def test_non_numeric_threshold_is_rejected(tmp_path):
+    es = _eval(tmp_path, n=2)
+    h = QuantHarness(model_factory=lambda p: _FakeModel(p))
+    with pytest.raises(ValueError):
+        h.compare(es, candidate_precisions=["int8"], max_drop_points="two")
+
+
+def test_empty_candidate_list_is_rejected_rather_than_reporting_pass(tmp_path):
+    """With no candidates, worst_drop falls back to default=0.0 and PASSes.
+
+    That is a green build in which no quantized model was ever measured.
+    """
+    es = _eval(tmp_path, n=4)
+    h = QuantHarness(model_factory=lambda p: _FakeModel(p))
+    with pytest.raises(ValueError, match="no candidate precisions"):
+        h.compare(es, candidate_precisions=[])
+
+
+def test_empty_candidate_list_is_rejected_before_any_model_is_built(tmp_path):
+    """The refusal must be cheap -- no baseline run, then a thrown-away result."""
+    built: list[str] = []
+    es = _eval(tmp_path, n=4)
+    h = QuantHarness(model_factory=lambda p: built.append(p) or _FakeModel(p))
+    with pytest.raises(ValueError):
+        h.compare(es, candidate_precisions=[])
+    assert built == [], f"models were built before validating arguments: {built}"
+
+
+# --------------------------------------------------------------------------
 # The real HF generate path.
 #
 # Every other test here uses a model with .answer(), so the generate branch of

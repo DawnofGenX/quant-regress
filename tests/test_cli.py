@@ -73,3 +73,81 @@ def test_missing_model_argument_exits_2(tmp_path, monkeypatch):
     monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
     rc = main(["--eval", _eval(tmp_path)])
     assert rc == 2
+
+
+# --------------------------------------------------------------------------
+# The exit code IS the contract with CI. A configuration mistake must never
+# exit 1, because 1 means "accuracy regressed" -- a build that fails for the
+# wrong reason teaches people to ignore it.
+# --------------------------------------------------------------------------
+
+
+def test_directory_as_eval_exits_2_not_1(tmp_path, monkeypatch):
+    """A directory passes exists(); read_text() raised IsADirectoryError uncaught,
+    which escaped main() and surfaced as exit 1."""
+    d = tmp_path / "evals"
+    d.mkdir()
+    (d / "x.jsonl").write_text("{}\n", encoding="utf-8")
+
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", str(d), "--model", "fake-model"])
+    assert rc == 2, "a directory must be a usage error, never 'accuracy regressed'"
+
+
+def test_nan_threshold_exits_2_not_0(tmp_path, monkeypatch, capsys):
+    """NaN threshold previously reported PASS (exit 0) for a real regression."""
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision, correct=(precision == "fp32"))
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path), "--model", "fake-model",
+               "--max-drop-points", "nan"])
+    assert rc == 2
+    assert "NaN" in capsys.readouterr().err
+
+
+def test_negative_threshold_exits_2(tmp_path, monkeypatch, capsys):
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision, correct=(precision == "fp32"))
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path), "--model", "fake-model",
+               "--max-drop-points", "-1"])
+    assert rc == 2
+    assert ">= 0" in capsys.readouterr().err
+
+
+def test_empty_precisions_exits_2_not_0(tmp_path, monkeypatch, capsys):
+    """`--precisions ""` produced no candidates, so PASS with nothing compared."""
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision, correct=(precision == "fp32"))
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path), "--model", "fake-model",
+               "--precisions", ""])
+    assert rc == 2
+    assert "no candidate precisions" in capsys.readouterr().err
+
+
+def test_malformed_eval_json_exits_2(tmp_path, monkeypatch):
+    p = tmp_path / "bad.jsonl"
+    p.write_text("{not json}\n", encoding="utf-8")
+
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", str(p), "--model", "fake-model"])
+    assert rc == 2
+
+
+def test_missing_eval_file_exits_2(tmp_path, monkeypatch):
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", str(tmp_path / "nope.jsonl"), "--model", "fake-model"])
+    assert rc == 2

@@ -44,6 +44,19 @@ class EvalSet:
         p = Path(path)
         if not p.exists():
             raise EvalSetError(f"eval set not found: {p}")
+        # A directory passes `exists()`, and `read_text()` on one raises
+        # IsADirectoryError -- an uncaught OSError that escaped the CLI's error
+        # handling and surfaced as exit 1, the code that means "accuracy
+        # regressed". A configuration mistake impersonating a real regression
+        # trains people to ignore the one exit code that matters, so check it
+        # here where the message can be actionable.
+        if p.is_dir():
+            raise EvalSetError(
+                f"eval set path is a directory, not a JSONL file: {p}. "
+                f"Pass the path to the file itself."
+            )
+        if not p.is_file():
+            raise EvalSetError(f"eval set is not a regular file: {p}")
         cases: list[Case] = []
         seen: set[str] = set()
         for lineno, raw in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):

@@ -89,7 +89,11 @@ def main(argv: list[str] | None = None) -> int:
             candidate_precisions=[p.strip() for p in args.precisions.split(",") if p.strip()],
             max_drop_points=args.max_drop_points,
         )
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
+        # ValueError covers the argument checks inside compare() -- an
+        # unsatisfiable threshold, or no candidate precisions. Those are
+        # configuration mistakes, so they must exit 2 like a missing model or
+        # unreadable eval set, not traceback out of main().
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
 

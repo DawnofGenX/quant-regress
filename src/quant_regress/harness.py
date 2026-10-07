@@ -8,6 +8,7 @@ scoring every case at every precision and refusing to report a partial run.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -16,6 +17,47 @@ from typing import Callable, Sequence
 from .evalset import EvalSet, normalise
 
 SUPPORTED_PRECISIONS = ("fp32", "int8")
+
+
+def _check_threshold(max_drop_points: float) -> float:
+    """Reject thresholds that would make the gate unsatisfiable or inverting.
+
+    The verdict is ``worst_drop > max_drop_points``. Every value rejected here
+    was measured to break a real 100-point regression:
+
+    * ``nan`` — every comparison with nan is False, so PASS always wins.
+    * ``+inf`` — no finite drop can exceed infinity, so PASS always wins.
+    * negative — the test inverts into "the quantized model must be at least as
+      bad by N points", so an INT8 collapse PASSes and a healthy model FAILs.
+
+    Zero is allowed deliberately: it means "any regression fails", a coherent
+    policy for a gate whose whole purpose is to catch accuracy loss.
+    """
+    try:
+        value = float(max_drop_points)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"max_drop_points must be a number, got {max_drop_points!r}"
+        ) from exc
+    if math.isnan(value):
+        raise ValueError(
+            "max_drop_points is NaN: every comparison against NaN is False, so "
+            "the gate would report PASS for ANY regression. Pass a finite "
+            "number, e.g. 2.0."
+        )
+    if value == math.inf:
+        raise ValueError(
+            "max_drop_points is +inf: no accuracy drop can exceed it, so the "
+            "gate would always PASS. Pass a finite number, e.g. 2.0."
+        )
+    if value < 0:
+        raise ValueError(
+            f"max_drop_points must be >= 0, got {value}: a negative threshold "
+            "inverts the gate, so an INT8 accuracy collapse would PASS and a "
+            "healthy quantized model would FAIL. Use 0 to fail on any "
+            "regression."
+        )
+    return value
 
 
 class Verdict(str, Enum):
@@ -118,6 +160,22 @@ class QuantHarness:
                 )
         if not len(eval_set):
             raise ValueError("eval set is empty")
+
+        # A gate must not be able to PASS a regression. Every one of these
+        # cases measured a real 100-point drop and returned PASS (or inverted
+        # to FAIL), which is worse than no gate at all: the failure is silent.
+        _check_threshold(max_drop_points)
+
+        # With no candidates there is nothing to compare, so `worst_drop_points`
+        # falls back to its `default=0.0` and the run reports PASS having
+        # measured only the baseline. That is a green build with no comparison
+        # in it, so refuse instead.
+        if not candidate_precisions:
+            raise ValueError(
+                "no candidate precisions given: nothing would be compared against "
+                "the baseline, so the run would report PASS without measuring a "
+                "quantized model. Pass e.g. candidate_precisions=['int8']."
+            )
 
         baseline = self._measure(eval_set, baseline_precision)
         candidates = [self._measure(eval_set, p) for p in candidate_precisions]
