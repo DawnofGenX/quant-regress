@@ -20,6 +20,10 @@ inputs:
     description: "Fail if accuracy drops more than this many points."
     required: false
     default: "2"
+  min-accuracy:
+    description: "Fail if the BASELINE scores below this fraction (0.5 = 50%). Optional; without it only the drop is gated."
+    required: false
+    default: ""
   report-path:
     description: "Where to write the JSON report."
     required: false
@@ -39,3 +43,4 @@ runs:
     - ${{ inputs.max-drop-points }}
     - ${{ inputs.report-path }}
     - ${{ inputs.cache-dir }}
+    - ${{ inputs.min-accuracy }}

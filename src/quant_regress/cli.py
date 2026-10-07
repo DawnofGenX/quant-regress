@@ -36,6 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--baseline-precision", default="fp32")
     p.add_argument("--max-drop-points", type=float, default=2.0,
                    help="fail if any candidate drops more than this many points")
+    p.add_argument("--min-accuracy", type=float, default=None,
+                   help="fail if the BASELINE scores below this fraction "
+                        "(0.5 = 50%%). Without it, a model that is wrong at every "
+                        "precision yields a 0.00-point drop and PASSes.")
     p.add_argument("--max-new-tokens", type=int, default=32)
     p.add_argument("--report", default=None, help="write a JSON report here")
     p.add_argument("--cache-dir", default=None)
@@ -88,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
             baseline_precision=args.baseline_precision,
             candidate_precisions=[p.strip() for p in args.precisions.split(",") if p.strip()],
             max_drop_points=args.max_drop_points,
+            min_accuracy=args.min_accuracy,
         )
     except (RuntimeError, ValueError) as exc:
         # ValueError covers the argument checks inside compare() -- an
@@ -100,6 +105,13 @@ def main(argv: list[str] | None = None) -> int:
     print(_markdown(res))
     print(f"\nworst drop: {res.worst_drop_points:+.2f} pts "
           f"(threshold {args.max_drop_points:+.2f}) -> {res.verdict.value.upper()}")
+    if res.min_accuracy is not None:
+        floor = res.min_accuracy * 100.0
+        state = "BELOW" if res.baseline_below_floor else "ok"
+        print(f"baseline accuracy: {res.baseline.accuracy * 100:.1f}% "
+              f"(floor {floor:.1f}%) -> {state}")
+    if res.floor_failure:
+        print(f"\n{res.floor_failure}")
 
     if args.report:
         Path(args.report).parent.mkdir(parents=True, exist_ok=True)

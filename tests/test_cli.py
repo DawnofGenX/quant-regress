@@ -151,3 +151,90 @@ def test_missing_eval_file_exits_2(tmp_path, monkeypatch):
     monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
     rc = main(["--eval", str(tmp_path / "nope.jsonl"), "--model", "fake-model"])
     assert rc == 2
+
+
+# --------------------------------------------------------------------------
+# --min-accuracy: the gate's exit code for a model that is simply wrong.
+# This is a QUALITY failure, so exit 1 -- the tool measured correctly and the
+# answer is "no". Exit 2 stays reserved for "could not measure".
+# --------------------------------------------------------------------------
+
+
+class _AlwaysWrong(_Fake):
+    def answer(self, prompt: str) -> str:
+        return "no"
+
+
+def test_baseline_floor_breach_exits_1_not_0(tmp_path, monkeypatch):
+    """0/N at both precisions is a 0.00-point drop; with a floor it must FAIL."""
+    def factory(*a, **kw):
+        return lambda precision: _AlwaysWrong(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path), "--model", "fake-model",
+               "--min-accuracy", "0.5"])
+    assert rc == 1, "a model below the floor must fail the build"
+
+
+def test_baseline_floor_breach_exits_1_even_with_generous_drop_budget(
+    tmp_path, monkeypatch
+):
+    """The floor must be independent of max_drop_points."""
+    def factory(*a, **kw):
+        return lambda precision: _AlwaysWrong(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path), "--model", "fake-model",
+               "--max-drop-points", "99", "--min-accuracy", "0.5"])
+    assert rc == 1
+
+
+def test_floor_breach_is_explained_on_stderr_or_stdout(tmp_path, monkeypatch, capsys):
+    """A red build must say WHY, in words a reader can act on."""
+    def factory(*a, **kw):
+        return lambda precision: _AlwaysWrong(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    main(["--eval", _eval(tmp_path), "--model", "fake-model",
+          "--min-accuracy", "0.5"])
+    out = capsys.readouterr()
+    combined = out.out + out.err
+    assert "min-accuracy" in combined
+    assert "below" in combined.lower()
+
+
+def test_no_floor_flag_keeps_the_existing_pass_behaviour(tmp_path, monkeypatch):
+    """Opt-in: without --min-accuracy nothing changes, so no user is broken."""
+    def factory(*a, **kw):
+        return lambda precision: _AlwaysWrong(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path), "--model", "fake-model"])
+    assert rc == 0, "default behaviour must remain delta-only"
+
+
+def test_invalid_min_accuracy_exits_2(tmp_path, monkeypatch, capsys):
+    """A percentage where a fraction belongs is a usage error, not a FAIL."""
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision, correct=(precision == "fp32"))
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path), "--model", "fake-model",
+               "--min-accuracy", "50"])
+    assert rc == 2
+    assert "FRACTION" in capsys.readouterr().err
+
+
+def test_floor_breach_is_recorded_in_the_json_report(tmp_path, monkeypatch):
+    out = tmp_path / "report.json"
+
+    def factory(*a, **kw):
+        return lambda precision: _AlwaysWrong(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    main(["--eval", _eval(tmp_path), "--model", "fake-model",
+          "--min-accuracy", "0.5", "--report", str(out)])
+    data = json.loads(out.read_text())
+    assert data["min_accuracy"] == 0.5
+    assert data["baseline_below_floor"] is True
+    assert data["verdict"] == "fail"

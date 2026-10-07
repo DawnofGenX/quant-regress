@@ -60,6 +60,42 @@ def _check_threshold(max_drop_points: float) -> float:
     return value
 
 
+def _check_min_accuracy(min_accuracy: float | None) -> float | None:
+    """Validate the baseline-quality floor, or ``None`` when unset.
+
+    NaN would make every ``accuracy < min_accuracy`` comparison False, so the
+    floor would never fire -- the same silent-pass class as a NaN drop
+    threshold. Values are fractions in [0, 1]; a percentage like ``50`` is
+    rejected rather than silently read as 5000%, because a typo there would
+    disable the floor instead of tightening it.
+    """
+    if min_accuracy is None:
+        return None
+    try:
+        value = float(min_accuracy)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"min_accuracy must be a number, got {min_accuracy!r}"
+        ) from exc
+    if math.isnan(value):
+        raise ValueError(
+            "min_accuracy is NaN: every comparison against NaN is False, so the "
+            "floor would never fire and a useless model would PASS. Pass a "
+            "fraction such as 0.5 for 50%."
+        )
+    if value > 1.0:
+        raise ValueError(
+            f"min_accuracy is {value}, which is above 1.0: it is a FRACTION, "
+            "not percentage points. Pass 0.5 for 50%, not 50."
+        )
+    if value < 0.0:
+        raise ValueError(
+            f"min_accuracy must be >= 0, got {value}. Use 0 to require only that "
+            "the baseline answers at least once."
+        )
+    return value
+
+
 class Verdict(str, Enum):
     PASS = "pass"
     FAIL = "fail"
@@ -84,6 +120,19 @@ class ComparisonResult:
     candidates: list[PrecisionResult]
     max_drop_points: float
     verdict: Verdict
+    #: Minimum acceptable BASELINE accuracy as a fraction (0-1). ``None`` means
+    #: no floor was requested and only the delta is gated.
+    min_accuracy: float | None = None
+    #: Human-readable reason when the floor was breached, else ``None``.
+    floor_failure: str | None = None
+
+    @property
+    def baseline_below_floor(self) -> bool:
+        """True when the baseline itself is too weak to trust the comparison."""
+        return (
+            self.min_accuracy is not None
+            and self.baseline.accuracy < self.min_accuracy
+        )
 
     @property
     def worst_drop_points(self) -> float:
@@ -116,6 +165,9 @@ class ComparisonResult:
             ],
             "worst_drop_points": round(self.worst_drop_points, 3),
             "max_drop_points": self.max_drop_points,
+            "min_accuracy": self.min_accuracy,
+            "baseline_below_floor": self.baseline_below_floor,
+            "floor_failure": self.floor_failure,
             "verdict": self.verdict.value,
         }
 
@@ -152,7 +204,16 @@ class QuantHarness:
         baseline_precision: str = "fp32",
         candidate_precisions: Sequence[str] = ("int8",),
         max_drop_points: float = 2.0,
+        min_accuracy: float | None = None,
     ) -> ComparisonResult:
+        """Measure every precision and decide whether the build should pass.
+
+        ``max_drop_points`` gates the CHANGE from baseline to candidate.
+        ``min_accuracy`` gates the BASELINE's own quality: measured, a model
+        that is wrong at every precision yields a 0.00-point drop and a PASS,
+        so without a floor a useless model produces a green build. It is a
+        fraction in [0, 1] (0.5 means 50%), not percentage points.
+        """
         for p in (baseline_precision, *candidate_precisions):
             if p not in SUPPORTED_PRECISIONS:
                 raise ValueError(
@@ -165,6 +226,7 @@ class QuantHarness:
         # cases measured a real 100-point drop and returned PASS (or inverted
         # to FAIL), which is worse than no gate at all: the failure is silent.
         _check_threshold(max_drop_points)
+        _check_min_accuracy(min_accuracy)
 
         # With no candidates there is nothing to compare, so `worst_drop_points`
         # falls back to its `default=0.0` and the run reports PASS having
@@ -192,11 +254,31 @@ class QuantHarness:
         worst = max(
             ((baseline.accuracy - c.accuracy) * 100.0 for c in candidates), default=0.0
         )
+
+        # The floor is a QUALITY failure, not a configuration error, so it is a
+        # FAIL (exit 1) rather than exit 2: the tool measured correctly and the
+        # answer is "no". Exit 2 stays reserved for runs that could not measure.
+        floor_failure = None
+        if min_accuracy is not None and baseline.accuracy < min_accuracy:
+            floor_failure = (
+                f"baseline {baseline.precision} accuracy "
+                f"{baseline.accuracy * 100:.1f}% is below the --min-accuracy "
+                f"floor of {min_accuracy * 100:.1f}% "
+                f"({baseline.correct}/{baseline.total} correct). Quantization "
+                f"did not cause this, but a delta measured from a model this "
+                f"weak cannot be trusted, and an eval set the model simply "
+                f"cannot answer would otherwise PASS with a 0.00-point drop."
+            )
+
         return ComparisonResult(
             baseline=baseline,
             candidates=candidates,
             max_drop_points=max_drop_points,
-            verdict=Verdict.FAIL if worst > max_drop_points else Verdict.PASS,
+            verdict=Verdict.FAIL
+            if worst > max_drop_points or floor_failure
+            else Verdict.PASS,
+            min_accuracy=min_accuracy,
+            floor_failure=floor_failure,
         )
 
     # -- internals --------------------------------------------------------

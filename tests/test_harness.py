@@ -225,6 +225,129 @@ def test_empty_candidate_list_is_rejected_before_any_model_is_built(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# The gate reports CHANGE. Without a floor it also rubber-stamps a model that
+# is simply wrong at every precision: measured, 0/10 at both precisions yields a
+# 0.00-point drop and a PASS, i.e. a green build for a useless model.
+# --------------------------------------------------------------------------
+
+
+class _AlwaysWrong:
+    """0% at every precision — e.g. an eval set the model cannot answer."""
+
+    def __init__(self, precision: str):
+        self.precision = precision
+
+    def eval(self):
+        return self
+
+    def answer(self, prompt: str) -> str:
+        return "no"
+
+
+def test_a_useless_model_passes_without_a_floor(tmp_path):
+    """Documents the gap the floor exists to close. Baseline 0% -> PASS."""
+    es = _eval(tmp_path, n=10)
+    h = QuantHarness(model_factory=lambda p: _AlwaysWrong(p))
+    res = h.compare(es, candidate_precisions=["int8"], max_drop_points=2.0)
+    assert res.baseline.accuracy == 0.0
+    assert res.worst_drop_points == 0.0
+    assert res.verdict is Verdict.PASS, "this is the behaviour the floor overrides"
+
+
+def test_min_accuracy_fails_a_useless_model(tmp_path):
+    es = _eval(tmp_path, n=10)
+    h = QuantHarness(model_factory=lambda p: _AlwaysWrong(p))
+    res = h.compare(es, candidate_precisions=["int8"], max_drop_points=2.0,
+                    min_accuracy=0.5)
+    assert res.verdict is Verdict.FAIL
+    assert res.baseline_below_floor is True
+    assert "min-accuracy" in (res.floor_failure or "")
+
+
+def test_min_accuracy_is_a_quality_failure_not_a_config_error(tmp_path):
+    """FAIL (exit 1), not exit 2: the tool measured correctly; the answer is no."""
+    es = _eval(tmp_path, n=10)
+    h = QuantHarness(model_factory=lambda p: _AlwaysWrong(p))
+    res = h.compare(es, candidate_precisions=["int8"], min_accuracy=0.9)
+    # A harness-level FAIL. The CLI maps this to exit 1; exit 2 is reserved for
+    # runs that could not measure at all.
+    assert res.verdict is Verdict.FAIL
+    assert res.floor_failure is not None
+
+
+def test_min_accuracy_satisfied_still_gates_the_delta(tmp_path):
+    """The floor must not mask a real regression."""
+    es = _eval(tmp_path, n=6)
+    h = QuantHarness(model_factory=lambda p: _FakeModel(p, correct=(p == "fp32")))
+    res = h.compare(es, candidate_precisions=["int8"], min_accuracy=0.5)
+    assert res.baseline_below_floor is False
+    assert res.floor_failure is None
+    assert res.verdict is Verdict.FAIL, "delta gate must still fire"
+
+
+def test_min_accuracy_not_reached_exactly_is_allowed(tmp_path):
+    """A baseline exactly AT the floor passes; the comparison is strict `<`."""
+    rows = [{"id": str(i), "prompt": f"q{i}?", "expected": "yes"} for i in range(4)]
+    import json as _json
+    p = tmp_path / "e.jsonl"
+    p.write_text("\n".join(_json.dumps(r) for r in rows), encoding="utf-8")
+    es = EvalSet.load(p)
+
+    class _ThreeOfFour:
+        def __init__(self, p_): self.p = p_
+        def eval(self): return self
+        def answer(self, prompt): return "yes"
+
+    h = QuantHarness(model_factory=lambda p: _ThreeOfFour(p))
+    res = h.compare(es, candidate_precisions=["int8"], min_accuracy=1.0)
+    assert res.baseline.accuracy == 1.0
+    assert res.baseline_below_floor is False
+    assert res.verdict is Verdict.PASS
+
+
+def test_nan_min_accuracy_is_rejected_because_it_would_never_fire(tmp_path):
+    """Same silent-pass class as a NaN drop threshold."""
+    es = _eval(tmp_path, n=4)
+    h = QuantHarness(model_factory=lambda p: _AlwaysWrong(p))
+    with pytest.raises(ValueError, match="NaN"):
+        h.compare(es, candidate_precisions=["int8"], min_accuracy=float("nan"))
+
+
+def test_percentage_style_min_accuracy_is_rejected(tmp_path):
+    """A user typing 50 must be told it is a fraction, not silently accepted."""
+    es = _eval(tmp_path, n=4)
+    h = QuantHarness(model_factory=lambda p: _AlwaysWrong(p))
+    with pytest.raises(ValueError, match="FRACTION"):
+        h.compare(es, candidate_precisions=["int8"], min_accuracy=50)
+
+
+def test_negative_min_accuracy_is_rejected(tmp_path):
+    es = _eval(tmp_path, n=4)
+    h = QuantHarness(model_factory=lambda p: _AlwaysWrong(p))
+    with pytest.raises(ValueError, match=">= 0"):
+        h.compare(es, candidate_precisions=["int8"], min_accuracy=-0.1)
+
+
+def test_zero_min_accuracy_is_allowed(tmp_path):
+    """0 means 'the baseline must answer at least once' — coherent, so allowed."""
+    es = _eval(tmp_path, n=4)
+    h = QuantHarness(model_factory=lambda p: _FakeModel(p, correct=(p == "fp32")))
+    res = h.compare(es, candidate_precisions=["int8"], min_accuracy=0.0)
+    assert res.baseline_below_floor is False
+
+
+def test_report_records_the_floor_and_its_outcome(tmp_path):
+    es = _eval(tmp_path, n=10)
+    h = QuantHarness(model_factory=lambda p: _AlwaysWrong(p))
+    res = h.compare(es, candidate_precisions=["int8"], min_accuracy=0.5)
+    d = res.to_dict()
+    assert d["min_accuracy"] == 0.5
+    assert d["baseline_below_floor"] is True
+    assert d["verdict"] == "fail"
+    assert d["floor_failure"]
+
+
+# --------------------------------------------------------------------------
 # The real HF generate path.
 #
 # Every other test here uses a model with .answer(), so the generate branch of

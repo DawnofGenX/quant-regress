@@ -18,5 +18,8 @@
   ],
   "worst_drop_points": 100.0,
   "max_drop_points": 2.0,
+  "min_accuracy": null,
+  "baseline_below_floor": false,
+  "floor_failure": null,
   "verdict": "fail"
 }

@@ -10,6 +10,7 @@ build/
 # descend into an ignored directory, so the negation must be on `results/*`.
 results/*
 !results/int8_collapse.json
+!results/quiet_model.json
 
 # Secrets and local credentials — never commit these
 .env

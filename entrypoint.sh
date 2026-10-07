@@ -2,6 +2,7 @@
 set -eu
 
 EVAL="$1"; MODEL="$2"; PRECISIONS="$3"; MAX_DROP="$4"; REPORT="$5"; CACHE_DIR="${6:-}"
+MIN_ACCURACY="${7:-}"
 
 if [ ! -f "$EVAL" ]; then
   echo "::error::eval set not found at $EVAL"
@@ -15,6 +16,12 @@ set -- --eval "$EVAL" --model "$MODEL" \
 
 if [ -n "$CACHE_DIR" ]; then
   set -- "$@" --cache-dir "$CACHE_DIR"
+fi
+
+# Only forward the floor when provided: an empty string would fail validation
+# ("" is not a fraction), and the flag must stay opt-in.
+if [ -n "$MIN_ACCURACY" ]; then
+  set -- "$@" --min-accuracy "$MIN_ACCURACY"
 fi
 
 # Disable the HF Xet backend: it needs extra native deps that are absent in the

@@ -49,10 +49,18 @@ pip install quant-regress
 quant-regress --eval evals/tasks.jsonl \
               --model meta-llama/Llama-3.2-1B-Instruct \
               --max-drop-points 2 \
+              --min-accuracy 0.5 \
               --report quant-regress-report.json
 ```
 
 Exit codes: `0` within tolerance, `1` accuracy regressed, `2` bad configuration.
+
+**`--min-accuracy` is worth setting.** Without it the gate only measures *change*, so a
+model that is wrong at every precision yields a zero-point drop and **passes** — a green build
+for a model that cannot do the task at all. `--min-accuracy` is a fraction (`0.5` = half) and
+fails the build when the *baseline* is that weak. It is a quality failure, so it exits `1`,
+not `2`: the tool measured correctly and the answer is no. See
+[change is not quality](#change-is-not-quality-read-this-before-trusting-a-pass).
 
 ## Constraints worth knowing
 
@@ -78,6 +86,11 @@ Exit codes: `0` within tolerance, `1` accuracy regressed, `2` bad configuration.
   exact-after-normalisation comparison is what you get.)
 - **The threshold unit is accuracy points**, not a ratio. `--max-drop-points: 2`
   means "fail if any candidate is more than 2 points below the baseline".
+- **The two gates use different units, deliberately.** `--max-drop-points` is in
+  *percentage points*; `--min-accuracy` is a *fraction* — `0.5`, not `50`. A
+  percentage-style value is rejected with an explanatory error rather than
+  silently clamped, because a typo there would disable the floor instead of
+  tightening it.
 - Comparison is exact-after-normalisation by default. Pass a scorer if you need
   semantic equivalence.
 - Models are downloaded at run time. A 1B model is ~2 GB; check runner disk.
@@ -94,10 +107,28 @@ Exit codes: `0` within tolerance, `1` accuracy regressed, `2` bad configuration.
   drop, and the gate correctly reports PASS. It is also driven by a stub model
   exposing `.answer()`, so it tells you nothing about real decoding. Use it to
   see the output format; bring your own eval for a real check.
-- A model that is quiet at both precisions yields a 0.00-point drop and PASSes.
-  The gate reports *change*, not *quality*: if your baseline model is already
-  wrong, quant-regress will not tell you. Check the baseline accuracy in the
-  report before trusting a PASS.
+### Change is not quality — read this before trusting a PASS
+
+The gate's default judgement is about *change*: it fails when quantization costs
+accuracy. That means **a model that is equally bad at both precisions produces a
+zero-point drop and passes.** Measured on a ten-case set: <!-- claim:quiet-model -->
+a model answering nothing correctly at either precision reports
+`worst drop: +0.00 pts -> PASS` and exit `0` <!-- claim:quiet-model -->, and the same
+model with `--min-accuracy 0.5` reports `FAIL`. Regenerate with
+`python scripts/regen_quiet_model.py`; the run's output is committed at
+[`results/quiet_model.json`](results/quiet_model.json).
+
+That is correct for the tool's purpose — quantization did not cause it — but it
+means a green build is **not** evidence that the model works. Two options:
+
+- Pass `--min-accuracy 0.5` (or your own floor) so the baseline is gated too. This
+  turns the case above into `FAIL` / exit `1`, with the reason printed.
+- Read the baseline accuracy in the report (`results/*.json`, or the
+  `baseline accuracy:` line) before trusting a PASS. The number has always been
+  recorded; nothing enforced it.
+
+A floor breach is reported as a **quality** failure (exit `1`), not a configuration
+error (exit `2`), because the tool measured correctly and the answer is simply no.
 - What the repo's own CI pins is the **exit-code contract** (0 holds, 1 regressed,
   2 misconfigured), not any particular model's accuracy — see
   `tests/test_selftest_gate.py`.

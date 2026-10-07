@@ -1,0 +1,29 @@
+{
+  "n_cases": 10,
+  "rows": [
+    {
+      "case": "quiet_model_default",
+      "baseline_accuracy": 0.0,
+      "worst_drop_points": 0.0,
+      "verdict": "pass",
+      "min_accuracy": null,
+      "baseline_below_floor": false
+    },
+    {
+      "case": "quiet_model_floored",
+      "baseline_accuracy": 0.0,
+      "worst_drop_points": 0.0,
+      "verdict": "fail",
+      "min_accuracy": 0.5,
+      "baseline_below_floor": true
+    },
+    {
+      "case": "half_model_floored",
+      "baseline_accuracy": 0.5,
+      "worst_drop_points": 0.0,
+      "verdict": "pass",
+      "min_accuracy": 0.5,
+      "baseline_below_floor": false
+    }
+  ]
+}
