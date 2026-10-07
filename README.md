@@ -2,6 +2,10 @@
 
 Fail CI when quantization costs you task accuracy.
 
+> **If you pinned `@v1` before 2026-10-07, re-sync.** That tag has moved to pick up
+> five correctness fixes, including one where the gate reported PASS for a model it had
+> never actually quantized. See [`CHANGELOG.md`](CHANGELOG.md).
+
 Token-level proxies — perplexity, KL divergence — routinely report that a
 quantized model is fine. Task accuracy does not, provided you actually measure
 it. This action measures a task eval at each precision and fails the build when
@@ -39,7 +43,11 @@ As a GitHub Action:
     eval: evals/tasks.jsonl
     model: meta-llama/Llama-3.2-1B-Instruct
     max-drop-points: 2
+    min-accuracy: 0.5      # optional; see "Change is not quality" below
 ```
+
+`@v1` is a moving tag — it tracks the current release line, and has been re-pointed once
+(to pick up the fixes in `CHANGELOG.md`). Pin a commit SHA if you need immutability.
 
 Or from the command line / your own CI:
 
