@@ -6,7 +6,7 @@ before and after quantization so a regression fails a build instead of
 shipping.
 """
 
-__version__ = "0.1.1"
+__version__ = "1.0.1"
 
 from .harness import QuantHarness, ComparisonResult, Verdict
 
