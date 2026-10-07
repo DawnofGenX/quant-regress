@@ -4,20 +4,20 @@ on:
   release:
     types: [published]
 
-# Only a VERSION release (vX.Y.Z) publishes to PyPI.
+# Only a VERSION release (three dotted parts) publishes to PyPI.
 #
 # `v1` is the Action pin the README tells users to use, and it is a MOVING tag --
 # it tracks the release line rather than naming a version. Publishing on it meant
 # every re-point of `v1` re-ran this workflow and tried to upload whatever version
 # pyproject.toml happened to declare. Observed: moving `v1` to a commit whose
-# pyproject said 0.1.1 produced
-#   400 File already exists ('quant-regress-0.1.1-py3-none-any.whl')
+# pyproject said 0.1.1 produced a 400 "File already exists" for the 0.1.1 wheel,
 # because 0.1.1 was already on PyPI and filenames are immutable. Harmless (nothing
 # was overwritten) but it puts a permanently red run on the repo and trains people
 # to ignore it.
 #
-# The guard below makes the distinction explicit: a version tag matches ^v\d+\.\d+\.\d+$,
-# so `v0.1.1` publishes and `v1` does not.
+# The job guard below makes the distinction explicit: v0.1.1 publishes, v1 does not.
+# Keep this comment free of regex syntax -- an earlier draft embedded a pattern with
+# a trailing dollar sign here and the workflow failed to start with zero jobs.
 
 permissions:
   contents: read
@@ -25,8 +25,8 @@ permissions:
 jobs:
   publish:
     name: Build and publish to PyPI
-    # Skip the Action-pin tag. `if` must be on the job, not the trigger: the
-    # `on: release` filter cannot see github.event.release.tag_name.
+    # Skip the Action-pin tag. This guard must live on the job, because the
+    # release trigger cannot inspect the tag name itself.
     if: ${{ github.event.release.tag_name =~ '^v[0-9]+\.[0-9]+\.[0-9]+$' }}
     runs-on: ubuntu-latest
     environment:
