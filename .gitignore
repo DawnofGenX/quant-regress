@@ -5,7 +5,11 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
-results/
+# Run outputs are local by default, EXCEPT the committed artefacts that back the
+# README's claims. A `results/` entry alone does not work here: git does not
+# descend into an ignored directory, so the negation must be on `results/*`.
+results/*
+!results/int8_collapse.json
 
 # Secrets and local credentials — never commit these
 .env

@@ -1,0 +1,22 @@
+{
+  "baseline": {
+    "precision": "fp32",
+    "accuracy": 1.0,
+    "correct": 20,
+    "total": 20,
+    "seconds": 0.0
+  },
+  "candidates": [
+    {
+      "precision": "int8",
+      "accuracy": 0.0,
+      "correct": 0,
+      "total": 20,
+      "seconds": 0.0,
+      "drop_points": 100.0
+    }
+  ],
+  "worst_drop_points": 100.0,
+  "max_drop_points": 2.0,
+  "verdict": "fail"
+}

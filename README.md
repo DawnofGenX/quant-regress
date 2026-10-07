@@ -21,7 +21,9 @@ accuracy looking survivable while destroying the capability that mattered:
 
 Regenerate with `python scripts/regen_int8_collapse.py` — every figure above
 comes from that script, and `tests/test_claims_are_reproducible.py` fails the
-build if a number in this file stops matching it.
+build if a number in this file stops matching it. The run's output is committed at
+[`results/int8_collapse.json`](results/int8_collapse.json), so the table above can be
+audited without running anything.
 
 The pattern that matters: the quantized model still runs, still returns a valid
 answer, and still looks like a working model. It is simply wrong every time.
