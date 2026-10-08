@@ -219,6 +219,13 @@ class QuantHarness:
                 raise ValueError(
                     f"unsupported precision {p!r}; supported: {SUPPORTED_PRECISIONS}"
                 )
+        if baseline_precision in candidate_precisions:
+            raise ValueError(
+                f"baseline precision {baseline_precision!r} must not appear in "
+                f"candidate precisions {list(candidate_precisions)}: the harness "
+                f"would compare a model against itself, producing a 0.0-point "
+                f"drop and PASS without measuring any quantization regression."
+            )
         if not len(eval_set):
             raise ValueError("eval set is empty")
 
@@ -353,7 +360,16 @@ class QuantHarness:
             return tok.decode(new_ids, skip_special_tokens=True)
 
         # 3. logits -> label
-        logits = model(**{"input_ids": [[1]], "attention_mask": [[1]]}).logits
+        if tok is None:
+            raise RuntimeError(
+                "cannot evaluate a logits-only model without a tokenizer: "
+                "the prompt cannot be tokenized. Attach a tokenizer to the "
+                "model (model.tokenizer = ...) or use a model with .answer()."
+            )
+        text = prompt if self.system_prompt is None else f"{self.system_prompt}\n{prompt}"
+        inputs = tok(text, return_tensors="pt")
+        inputs = {k: v.to(getattr(model, "device", "cpu")) for k, v in inputs.items()}
+        logits = model(**inputs).logits
         row = logits[0]
         idx = int(max(range(len(row)), key=lambda i: float(row[i])))
         id2label = getattr(model, "config", None)

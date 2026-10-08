@@ -69,6 +69,22 @@ def test_rejects_a_directory_with_an_actionable_message(tmp_path):
     assert str(d) in msg, "the message must name the offending path"
 
 
+def test_rejects_non_utf8_file_with_actionable_error(tmp_path):
+    """A non-UTF-8 file must raise EvalSetError, not UnicodeDecodeError."""
+    p = tmp_path / "bad.jsonl"
+    p.write_bytes(b"\xff\xfe\x00\x01\n")
+    with pytest.raises(EvalSetError, match="utf-8|decode|encoding"):
+        EvalSet.load(p)
+
+
+def test_rejects_non_dict_json_row(tmp_path):
+    """A JSONL row that is a list/string/number must raise EvalSetError, not TypeError."""
+    p = tmp_path / "bad.jsonl"
+    p.write_text('["not", "a", "dict"]\n', encoding="utf-8")
+    with pytest.raises(EvalSetError, match="dict|object|row"):
+        EvalSet.load(p)
+
+
 def test_rejects_a_non_regular_file(tmp_path):
     """A fifo exists() but read_text() on it blocks waiting for a writer.
 

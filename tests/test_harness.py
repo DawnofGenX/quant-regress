@@ -100,31 +100,47 @@ def test_logits_only_model_uses_labels_not_a_stringified_logit(tmp_path):
     That bug made every logits-only model score 0% for the wrong reason, which
     silently defeated the regression gate. Reading through id2label makes "no"
     come out as "no" rather than as "0.1".
+
+    The fake carries a tokenizer because the harness now tokenizes the real
+    prompt on the logits path (it no longer feeds a hardcoded ``[[1]]``), so a
+    tokenizer-less logits model is refused with an actionable error instead of
+    being evaluated on an input the prompt never reached.
     """
     es = _eval(tmp_path, n=3)
 
     class _Cfg:
         id2label = {0: "no", 1: "yes"}
 
+    class _LogitsTok:
+        def __call__(self, text, return_tensors=None):
+            return {"input_ids": _FakeBatch([0] * (len(text) + 1))}
+
     class _LogitsOnly:
         def __init__(self, precision):
             self.precision = precision
             self.config = _Cfg()
+            self.tokenizer = _LogitsTok()
+            self.seen_lengths = []
 
         def eval(self):
             return self
 
         def __call__(self, **kw):
+            self.seen_lengths.append(len(kw["input_ids"]))
             return _Logits(0.9)  # argmax -> index 0 -> "no"
 
     h = QuantHarness(model_factory=lambda p: _LogitsOnly(p))
     model = _LogitsOnly("fp32")
     # The label map is what produces the text, not the raw logit value.
-    assert h._predict(model, None, "q?") == "no"
+    assert h._predict(model, model.tokenizer, "q?") == "no"
+    # And the prompt really was tokenized, so the answer is not an artefact
+    # of a hardcoded dummy input.
+    assert set(model.seen_lengths) == {3}, model.seen_lengths
 
     res = h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"])
     # "no" != "yes", so accuracy is 0 — reached through the label map.
     assert res.baseline.accuracy == 0.0
+    assert res.candidates[0].accuracy == 0.0
 
 
 def test_logits_only_model_without_labels_raises_actionable_error(tmp_path):
@@ -142,11 +158,62 @@ def test_logits_only_model_without_labels_raises_actionable_error(tmp_path):
         h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"])
 
 
+def test_logits_path_uses_prompt_not_dummy_input(tmp_path):
+    """The logits path must tokenize the actual prompt, not a hardcoded dummy.
+
+    Pre-fix: input_ids=[[1]] was passed regardless of prompt, so every case
+    got the same prediction and the evaluation was meaningless.
+    """
+    rows = [
+        {"id": "a", "prompt": "x?", "expected": "yes"},
+        {"id": "b", "prompt": "a much longer prompt that tokenizes differently?", "expected": "yes"},
+        {"id": "c", "prompt": "medium length prompt here?", "expected": "yes"},
+    ]
+    p = tmp_path / "eval.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    es = EvalSet.load(p)
+
+    class _Tok:
+        def __call__(self, text, return_tensors=None):
+            return {"input_ids": _FakeBatch([0] * (len(text) + 1))}
+
+    class _LogitsModel:
+        def __init__(self, precision):
+            self.precision = precision
+            self.tokenizer = _Tok()
+            self.seen_lengths = []
+
+        def eval(self):
+            return self
+
+        def __call__(self, **kw):
+            n = len(kw["input_ids"])
+            self.seen_lengths.append(n)
+            return _Logits(0.9 if n > 5 else 0.1)
+
+    model = _LogitsModel("fp32")
+    h = QuantHarness(model_factory=lambda p: model, labels=["no", "yes"])
+    h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"])
+    assert len(set(model.seen_lengths)) > 1, (
+        f"all prompts produced the same input length {model.seen_lengths}, "
+        f"so the prompt was not tokenized"
+    )
+
+
 def test_unsupported_precision_is_rejected(tmp_path):
     es = _eval(tmp_path, n=2)
     h = QuantHarness(model_factory=lambda p: _FakeModel(p))
     with pytest.raises(ValueError, match="unsupported precision"):
         h.compare(es, baseline_precision="fp32", candidate_precisions=["int4"])
+
+
+def test_baseline_equal_to_candidate_is_rejected(tmp_path):
+    """If baseline == candidate, the harness compares a model against itself,
+    producing 0.0 drop and PASS without measuring any quantization regression."""
+    es = _eval(tmp_path, n=4)
+    h = QuantHarness(model_factory=lambda p: _FakeModel(p, correct=(p == "fp32")))
+    with pytest.raises(ValueError, match="baseline.*candidate"):
+        h.compare(es, baseline_precision="int8", candidate_precisions=["int8"])
 
 
 # --------------------------------------------------------------------------

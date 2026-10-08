@@ -59,7 +59,14 @@ class EvalSet:
             raise EvalSetError(f"eval set is not a regular file: {p}")
         cases: list[Case] = []
         seen: set[str] = set()
-        for lineno, raw in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+        try:
+            text = p.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise EvalSetError(
+                f"eval set is not valid UTF-8: {p}. "
+                f"Fix the file encoding or re-save it as UTF-8."
+            ) from exc
+        for lineno, raw in enumerate(text.splitlines(), 1):
             line = raw.strip()
             if not line:
                 continue
@@ -67,6 +74,12 @@ class EvalSet:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise EvalSetError(f"line {lineno}: invalid JSON ({exc})") from exc
+            if not isinstance(row, dict):
+                raise EvalSetError(
+                    f"line {lineno}: each row must be a JSON object (dict), "
+                    f"got {type(row).__name__}. Example: "
+                    f'{{"id": "1", "prompt": "...", "expected": "..."}}'
+                )
             missing = [k for k in ("id", "prompt", "expected") if k not in row]
             if missing:
                 raise EvalSetError(f"line {lineno}: missing {', '.join(missing)}")
