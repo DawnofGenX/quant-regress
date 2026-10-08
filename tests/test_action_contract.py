@@ -277,6 +277,121 @@ def test_every_action_value_reaches_the_cli_with_its_value(tmp_path):
         )
 
 
+def test_every_action_input_is_forwarded_to_the_cli(tmp_path):
+    """Every input the action declares must reach the CLI under its flag.
+
+    This is the check that catches the gap this class of bug always takes:
+    an input is added to action.yml, the entrypoint's case arm is not updated,
+    and the first user who sets that input gets `unknown argument` and exit 2
+    -- our own configuration error, shipped.
+
+    Found live: `--junit-path` was declared in action.yml but missing from
+    entrypoint.sh, so `output-format: junit` with a custom path failed.
+    """
+    action = (ROOT / "action.yml").read_text(encoding="utf-8")
+
+    # Parse `inputs:` by raw indentation, not by stripped text: an input name
+    # sits at 2 spaces, its attributes at 4, so the block ends at the first
+    # line indented no deeper than `inputs:` itself.
+    declared_inputs = set()
+    in_inputs = False
+    inputs_indent = -1
+    for line in action.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if line.strip() == "inputs:":
+            in_inputs = True
+            inputs_indent = indent
+            continue
+        if in_inputs and indent <= inputs_indent:
+            in_inputs = False
+        if in_inputs and indent == inputs_indent + 2 and ":" in line:
+            key = line.strip().split(":", 1)[0].strip()
+            if key:
+                declared_inputs.add(key)
+
+    # input-name -> the flag the entrypoint must accept for it.
+    # `report-path` maps to `--report`, the only name that differs.
+    flag_renames = {"report-path": "report"}
+    expected_flags = {
+        f"--{flag_renames.get(name, name)}" for name in declared_inputs
+    }
+
+    entrypoint = ENTRYPOINT.read_text(encoding="utf-8")
+    case_arm = None
+    for line in entrypoint.splitlines():
+        tokens = [t for t in line.strip().split("|") if t.startswith("--")]
+        if len(tokens) >= 3:
+            case_arm = line.strip().rstrip(")")
+            break
+    assert case_arm, "could not find the entrypoint's flag case arm"
+    accepted = {t.strip() for t in case_arm.split("|") if t.strip().startswith("--")}
+
+    missing = expected_flags - accepted
+    assert not missing, (
+        f"action.yml declares inputs whose flags the entrypoint does not "
+        f"accept: {sorted(missing)}. A user setting any of them gets "
+        f"`unknown argument` and exit 2. Accepted: {sorted(accepted)}"
+    )
+
+
+def test_action_yaml_actually_passes_every_input_it_declares():
+    """Every declared input must appear in the args list, not just be documented.
+
+    The other test catches a flag the entrypoint does not accept. This one
+    catches the mirror image: the input is declared in `inputs:` and accepted
+    by the entrypoint, but `args:` never forwards it -- so a user sets it,
+    the action runs, and nothing happens. Silent, and invisible in CI logs.
+
+    Found live: `system-prompt`, `labels` and `junit-path` were all declared
+    in `inputs:` while `args:` forwarded only the original seven.
+    """
+    action = (ROOT / "action.yml").read_text(encoding="utf-8")
+
+    declared_inputs = set()
+    passed_flags = set()
+    in_inputs = False
+    in_args = False
+    inputs_indent = -1
+    args_indent = -1
+
+    for line in action.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        text = line.strip()
+
+        if text == "inputs:":
+            in_inputs, inputs_indent = True, indent
+            continue
+        if text == "args:":
+            in_args, args_indent = True, indent
+            continue
+        if in_inputs and indent <= inputs_indent:
+            in_inputs = False
+        if in_args and indent <= args_indent:
+            in_args = False
+
+        if in_inputs and indent == inputs_indent + 2 and ":" in text:
+            declared_inputs.add(text.split(":", 1)[0].strip())
+        if in_args and text.startswith("- --"):
+            passed_flags.add(text.split()[1])
+        elif in_args and text.startswith("- ${{"):
+            # Ensure the value following a --flag really is a template, not a
+            # literal, so a flag cannot be forwarded with a constant value.
+            assert "inputs." in text, f"args: forwards a literal: {text}"
+
+    # `report-path` is the action input; `--report` is the CLI flag.
+    expected = {f"--{'report' if n == 'report-path' else n}" for n in declared_inputs}
+    missing = expected - passed_flags
+    assert not missing, (
+        f"action.yml declares inputs that args: never forwards: {sorted(missing)}. "
+        f"A user setting any of them is silently ignored. "
+        f"Forwarded: {sorted(passed_flags)}"
+    )
+
+
 # --------------------------------------------------------------------------
 # The JUnit output the action publishes must be well-formed XML, or the CI
 # pane that renders it shows nothing at all.

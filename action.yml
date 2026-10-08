@@ -95,8 +95,14 @@ runs:
     - ${{ inputs.max-new-tokens }}
     - --scorer
     - ${{ inputs.scorer }}
+    - --system-prompt
+    - ${{ inputs.system-prompt }}
+    - --labels
+    - ${{ inputs.labels }}
     - --output-format
     - ${{ inputs.output-format }}
+    - --junit-path
+    - ${{ inputs.junit-path }}
     - --report
     - ${{ inputs.report-path }}
     - --hf-token

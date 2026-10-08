@@ -13,7 +13,10 @@ MAX_DROP="2"
 MIN_ACCURACY=""
 MAX_NEW_TOKENS="32"
 SCORER="exact"
+SYSTEM_PROMPT=""
+LABELS=""
 OUTPUT_FORMAT="text"
+JUNIT_PATH=""
 REPORT="quant-regress-report.json"
 HF_TOKEN_INPUT=""
 CACHE_DIR=""
@@ -21,7 +24,7 @@ CACHE_DIR=""
 while [ $# -gt 0 ]; do
   flag="$1"
   case "$flag" in
-    --eval|--model|--precisions|--baseline-precision|--max-drop-points|--min-accuracy|--max-new-tokens|--scorer|--output-format|--report|--hf-token|--cache-dir)
+    --eval|--model|--precisions|--baseline-precision|--max-drop-points|--min-accuracy|--max-new-tokens|--scorer|--system-prompt|--labels|--output-format|--junit-path|--report|--hf-token|--cache-dir)
       shift
       [ $# -gt 0 ] || { echo "::error::missing value for $flag"; exit 2; }
       case "$flag" in
@@ -33,7 +36,10 @@ while [ $# -gt 0 ]; do
         --min-accuracy) MIN_ACCURACY="$1" ;;
         --max-new-tokens) MAX_NEW_TOKENS="$1" ;;
         --scorer) SCORER="$1" ;;
+        --system-prompt) SYSTEM_PROMPT="$1" ;;
+        --labels) LABELS="$1" ;;
         --output-format) OUTPUT_FORMAT="$1" ;;
+        --junit-path) JUNIT_PATH="$1" ;;
         --report) REPORT="$1" ;;
         --hf-token) HF_TOKEN_INPUT="$1" ;;
         --cache-dir) CACHE_DIR="$1" ;;
@@ -72,8 +78,25 @@ if [ -n "$MIN_ACCURACY" ]; then
   set -- "$@" --min-accuracy "$MIN_ACCURACY"
 fi
 
+# Free-text inputs are dropped when empty rather than passed as "", which the
+# CLI would otherwise read as an empty system prompt or an empty label list.
+if [ -n "$SYSTEM_PROMPT" ]; then
+  set -- "$@" --system-prompt "$SYSTEM_PROMPT"
+fi
+
+if [ -n "$LABELS" ]; then
+  set -- "$@" --labels "$LABELS"
+fi
+
 if [ -n "$CACHE_DIR" ]; then
   set -- "$@" --cache-dir "$CACHE_DIR"
+fi
+
+# Forwarded only when set, for the same reason as the floor: an empty value
+# must not become the literal JUnit filename (the CLI falls back to a
+# alongside --report only when the flag is absent).
+if [ -n "$JUNIT_PATH" ]; then
+  set -- "$@" --junit-path "$JUNIT_PATH"
 fi
 
 # An explicit input wins; otherwise fall back to the HF_TOKEN repository secret
