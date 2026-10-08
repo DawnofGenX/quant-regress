@@ -16,18 +16,57 @@ inputs:
     description: "Comma-separated candidate precisions."
     required: false
     default: "int8"
+  baseline-precision:
+    description: "Precision the candidates are compared against."
+    required: false
+    default: "fp32"
   max-drop-points:
     description: "Fail if accuracy drops more than this many points."
     required: false
     default: "2"
   min-accuracy:
-    description: "Fail if the BASELINE scores below this fraction (0.5 = 50%). Optional; without it only the drop is gated."
+    description: >-
+      Fail if the BASELINE scores below this fraction (0.5 = 50%). Optional;
+      without it only the drop is gated.
+    required: false
+    default: ""
+  max-new-tokens:
+    description: "Cap on generated tokens per case."
+    required: false
+    default: "32"
+  scorer:
+    description: >-
+      How a prediction is matched against `expected`: exact (normalised
+      equality) or contains.
+    required: false
+    default: "exact"
+  system-prompt:
+    description: "Optional system prompt prepended to every case."
+    required: false
+    default: ""
+  labels:
+    description: >-
+      Comma-separated label names for a logits-only model with no id2label.
+    required: false
+    default: ""
+  output-format:
+    description: "text (default), json, or junit for a CI test-results pane."
+    required: false
+    default: "text"
+  junit-path:
+    description: "Where to write JUnit XML when output-format is junit."
     required: false
     default: ""
   report-path:
     description: "Where to write the JSON report."
     required: false
     default: "quant-regress-report.json"
+  hf-token:
+    description: >-
+      HF access token for a gated model. Leave empty to use the HF_TOKEN
+      repository secret instead -- the value is never printed.
+    required: false
+    default: ""
   cache-dir:
     description: "Optional HF cache directory."
     required: false
@@ -36,11 +75,31 @@ inputs:
 runs:
   using: "docker"
   image: "Dockerfile"
+  # Named arguments, in the order entrypoint.sh maps them. Positional args
+  # grew unreadable as flags were added; every value is now passed as
+  # --flag value so a new input is a one-line change in both files.
   args:
+    - --eval
     - ${{ inputs.eval }}
+    - --model
     - ${{ inputs.model }}
+    - --precisions
     - ${{ inputs.precisions }}
+    - --baseline-precision
+    - ${{ inputs.baseline-precision }}
+    - --max-drop-points
     - ${{ inputs.max-drop-points }}
-    - ${{ inputs.report-path }}
-    - ${{ inputs.cache-dir }}
+    - --min-accuracy
     - ${{ inputs.min-accuracy }}
+    - --max-new-tokens
+    - ${{ inputs.max-new-tokens }}
+    - --scorer
+    - ${{ inputs.scorer }}
+    - --output-format
+    - ${{ inputs.output-format }}
+    - --report
+    - ${{ inputs.report-path }}
+    - --hf-token
+    - ${{ inputs.hf-token }}
+    - --cache-dir
+    - ${{ inputs.cache-dir }}

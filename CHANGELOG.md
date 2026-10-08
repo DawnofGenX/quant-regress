@@ -4,6 +4,64 @@ All notable changes to quant-regress. This project is pre-1.0 stable in API but 
 `v1` GitHub Action tag is what users are told to pin, so **action-visible changes are
 called out here as breaking**.
 
+## 1.0.3 — pinned at `v1`
+
+### Fixed — the measurement path could OOM, crash, or certify a fake quantization
+
+- **Models are released as soon as their measurement finishes**, in a `finally` so
+  a raising scorer cannot leak one. Two precisions means two models, and a 7B
+  checkpoint held twice is ~28 GB on a runner with far less.
+- **The fp32 original is dropped and a collection forced** right after
+  `quantize_dynamic` returns, so peak memory is no longer 2x the model size.
+- **A broken model exits 2 instead of tracebacking.** `_predict` failures are
+  re-raised as `RegressError` (a `RuntimeError`), which the CLI already catches. An
+  unhandled `TypeError` from a broken model previously exited **1** — the code
+  meaning "accuracy regressed", i.e. a broken model impersonating a regression.
+- **An unwritable `--report` path exits 2 with a message** instead of crashing
+  after the measurement already produced a verdict.
+- **The quantize guard fires on the swap count alone.** It previously required
+  `and blocked:`, a second condition a small `nn.Linear` model can never satisfy —
+  so an encoder with a handful of Linear layers passed with an "int8" arm that was
+  fp32 in all but name, and the gate compared a model against itself.
+- **The incomplete-run check now works.** `_measure` recorded `total=len(eval_set)`
+  — the *declared* size — so the check in `compare()` compared a number against
+  itself and could never fire. It records the count actually scored, so a set that
+  yields fewer cases than it declares is refused rather than reported as a verdict.
+
+### Added — the CLI surface
+
+- `--scorer exact|contains`. A fixed pair, not an expression: this tool runs on
+  arbitrary PRs, and evaluating one would be code execution.
+- `--labels`, `--system-prompt`, `--hf-token` (falls back to `$HF_TOKEN`).
+- `--output-format text|json|junit` with `--junit-path`. JUnit is what Jenkins,
+  GitLab and the GitHub test-results pane read.
+- `--progress-every N`, printed to **stderr** so stdout stays parseable.
+- **Precisions are validated before any model is built**, so a typo like `int4`
+  costs nothing to discover instead of a full download.
+- **`to_dict()` carries `misclassified` ids for every arm** — a red build names the
+  cases that got worse.
+
+### Added — the Action
+
+- The entrypoint binds **named** arguments (`--eval <path> …`) instead of
+  `$1..$7` positionally. The positional list silently mis-bound the moment a flag
+  was added: `--max-new-tokens` could arrive as `--min-accuracy`.
+- New inputs: `baseline-precision`, `max-new-tokens`, `scorer`, `system-prompt`,
+  `labels`, `output-format`, `junit-path`, `hf-token`. All default to the previous
+  behaviour.
+
+### Fixed in the test suite
+
+- `test_action_contract.py` pins the action's argument translation, including that
+  an empty `--min-accuracy` is dropped rather than forwarded as `""` (which would
+  fail validation and disable the floor).
+- Coverage added for four paths that were reachable but unguarded: the
+  incomplete-run refusal, the empty-eval-set refusal, a custom scorer actually
+  being called, and default-scorer normalisation. The first of those exposed the
+  real `total=len(eval_set)` defect above.
+- Every new guard was verified load-bearing by re-introducing the bug and
+  confirming the specific test goes red, then green on restore.
+
 ## 1.0.2 — pinned at `v1`
 
 ### Fixed

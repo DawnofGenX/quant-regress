@@ -332,11 +332,13 @@ class QuantHarness:
             tok = getattr(model, "tokenizer", None)
             correct = 0
             mis: list[str] = []
+            scored = 0
             t0 = time.perf_counter()
             for i, case in enumerate(eval_set, 1):
                 pred = self._predict(model, tok, case.prompt)
                 ok = self._scorer(pred, case.expected)
                 correct += int(ok)
+                scored += 1
                 if not ok:
                     mis.append(case.id)
                 if progress is not None:
@@ -344,7 +346,13 @@ class QuantHarness:
             return PrecisionResult(
                 precision=precision,
                 correct=correct,
-                total=len(eval_set),
+                # The count actually SCORED, not len(eval_set). The two differ
+                # exactly when the set yields fewer cases than it declares,
+                # and that difference is what the incomplete-run check in
+                # compare() exists to catch -- recording len() here made that
+                # check compare a number against itself, so it could never
+                # fire and a partial run was reported as a verdict.
+                total=scored,
                 seconds=time.perf_counter() - t0,
                 misclassified=mis,
             )

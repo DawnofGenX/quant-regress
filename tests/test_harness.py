@@ -6,8 +6,8 @@ import weakref
 
 import pytest
 
-from quant_regress.evalset import EvalSet
-from quant_regress.harness import QuantHarness, Verdict
+from quant_regress.evalset import Case, EvalSet, EvalSetError
+from quant_regress.harness import QuantHarness, RegressError, Verdict
 
 
 class _Logits:
@@ -665,3 +665,124 @@ def test_generate_path_is_reachable_end_to_end_and_can_score(tmp_path):
         "the generate path scored 0 despite producing the expected answer"
     )
     assert res.verdict is Verdict.PASS
+
+# --------------------------------------------------------------------------
+# Phase 4 -- coverage for paths that were previously reachable but unguarded.
+# Each of these could regress silently: the guard exists, nothing proved it
+# still fires.
+# --------------------------------------------------------------------------
+
+
+class _Partial:
+    """Scores only some of the cases, as a model that gives up mid-run would."""
+
+    def __init__(self, precision: str, stop_after: int):
+        self.precision = precision
+        self.stop_after = stop_after
+
+    def eval(self):
+        return self
+
+    def answer(self, prompt: str) -> str:
+        return "yes"
+
+
+class _ShortEval:
+    """An eval set that shrank after some precisions already ran.
+
+    The realistic shape of this defect: a set that yields fewer cases to one
+    arm than to another -- for instance a lazy iterator that is exhausted, or
+    a set mutated concurrently. The harness must refuse a partial number
+    rather than report accuracy computed over a subset as though it were the
+    whole set.
+    """
+
+    def __init__(self, first: int, then: int):
+        self._n = first
+        self._then = then
+        self._passes = 0
+
+    def __len__(self):
+        return self._n
+
+    def __iter__(self):
+        self._passes += 1
+        n = self._n if self._passes == 1 else self._then
+        for i in range(n):
+            yield Case(id=f"c{i}", prompt=f"p{i}", expected="yes")
+
+
+def test_incomplete_run_is_refused_rather_than_reporting_a_partial_number():
+    """A partial run must not be reported as a verdict.
+
+    Without the check, a model that answers only part of the set produces a
+    plausible-looking accuracy over the cases it did answer -- a number that
+    looks like a measurement but is not one, and it would be compared against
+    a full baseline as if the two were comparable.
+    """
+    ev = _ShortEval(first=6, then=3)
+    h = QuantHarness(model_factory=lambda p: _FakeModel(p))
+    with pytest.raises(RuntimeError, match="incomplete"):
+        h.compare(ev, baseline_precision="fp32", candidate_precisions=["int8"])
+
+
+def test_empty_eval_set_is_refused(tmp_path):
+    """A gate with no cases cannot measure anything, so it must refuse.
+
+    Refusing matters because the fallback -- reporting an empty run as a
+    verdict -- would let any configuration green through CI.
+    """
+    p = tmp_path / "empty.jsonl"
+    p.write_text("", encoding="utf-8")
+    with pytest.raises(EvalSetError, match="empty"):
+        EvalSet.load(p)
+
+    # The harness refuses a zero-length set independently of the loader, so a
+    # programmatic caller cannot bypass the check by constructing one directly.
+    with pytest.raises(ValueError, match="empty"):
+        QuantHarness(model_factory=lambda p: _FakeModel(p)).compare(
+            EvalSet([]), candidate_precisions=["int8"]
+        )
+
+
+def test_a_custom_scorer_is_actually_used(tmp_path):
+    """QuantHarness(scorer=...) must reach the scorer, not just accept it.
+
+    A scorer that is stored and never called would make every custom scoring
+    setup silently fall back to exact matching -- which then fails to match
+    anything, so the run looks like a model problem rather than a wiring bug.
+    """
+    es = _eval(tmp_path, n=3)
+    calls: list[tuple[str, str]] = []
+
+    def custom(pred, expected):
+        calls.append((pred, expected))
+        return True  # everything is "correct"
+
+    h = QuantHarness(model_factory=lambda p: _FakeModel(p), scorer=custom)
+    res = h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"])
+
+    assert calls, "the custom scorer was never called -- it was accepted and dropped"
+    assert res.baseline.accuracy == 1.0, "the scorer's verdict did not reach the result"
+
+
+def test_default_scorer_matches_after_normalisation(tmp_path):
+    """The default is normalised equality, so case and spacing must not matter."""
+    rows = [{"id": "a", "prompt": "x?", "expected": "  YES  "}]
+    p = tmp_path / "e.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    es = EvalSet.load(p)
+
+    class _Chatty:
+        def __init__(self, precision):
+            self.precision = precision
+
+        def eval(self):
+            return self
+
+        def answer(self, prompt):
+            return "Yes"
+
+    h = QuantHarness(model_factory=lambda p: _Chatty(p))
+    res = h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"])
+    assert res.baseline.accuracy == 1.0, "exact scoring should normalise before comparing"

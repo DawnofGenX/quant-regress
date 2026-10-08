@@ -63,6 +63,31 @@ quant-regress --eval evals/tasks.jsonl \
 
 Exit codes: `0` within tolerance, `1` accuracy regressed, `2` bad configuration.
 
+### Outputs
+
+`--report` writes JSON containing every arm's accuracy, the drop in points, and the
+`misclassified` case ids — so a red build names the cases that got worse instead of
+only saying that something did. `--output-format junit --junit-path results.xml`
+additionally writes JUnit XML with one `<testcase>` per precision, each failing arm
+carrying a `<failure>` naming the drop and the cases. That is what Jenkins, GitLab
+and the GitHub test-results pane render.
+
+`--progress-every 25` prints a progress line to **stderr** every N cases. Stdout
+stays a parseable table, so a workflow that greps the summary line is unaffected.
+
+### Matching a chatty model
+
+`--scorer contains` matches when `expected` appears anywhere in the prediction, for
+a model that answers in a sentence. The default is `exact` — normalised equality,
+which is what makes a marginal-decision drop visible in the first place. Only those
+two are exposed on the CLI; a scorer that needs real logic belongs in the library,
+via `QuantHarness(..., scorer=fn)`. Deliberately not an arbitrary expression: this
+tool runs on arbitrary PRs, and evaluating one would be code execution.
+
+`--labels "no,yes"` names the classes for a logits-only model with no `id2label`.
+`--system-prompt` prepends a prompt to every case. `--hf-token` (or `$HF_TOKEN`)
+authenticates a gated model.
+
 **`--min-accuracy` is worth setting.** Without it the gate only measures *change*, so a
 model that is wrong at every precision yields a zero-point drop and **passes** — a green build
 for a model that cannot do the task at all. `--min-accuracy` is a fraction (`0.5` = half) and
@@ -88,10 +113,9 @@ not `2`: the tool measured correctly and the answer is no. See
 - **Only the model's continuation is scored.** `generate()` returns the prompt
   followed by the new tokens, so the prediction is what the model added — not
   the question you asked it. Prompts should ask for a short, exact answer, and
-  `expected` should be that answer. A chatty model will not exact-match: pass a
-  custom scorer via `QuantHarness(..., scorer=fn)` when using the library. (There
-  is no `--scorer` flag on the CLI yet; from the command line the default
-  exact-after-normalisation comparison is what you get.)
+  `expected` should be that answer. A chatty model will not exact-match: use
+  `--scorer contains`, or pass a scorer via `QuantHarness(..., scorer=fn)` when
+  using the library.
 - **The threshold unit is accuracy points**, not a ratio. `--max-drop-points: 2`
   means "fail if any candidate is more than 2 points below the baseline".
 - **The two gates use different units, deliberately.** `--max-drop-points` is in
