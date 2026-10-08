@@ -6,6 +6,7 @@ import json
 import pytest
 
 from quant_regress.cli import main
+from quant_regress.harness import QuantHarness
 
 
 class _Fake:
@@ -364,3 +365,209 @@ def test_model_that_cannot_produce_text_exits_2_not_a_crash(tmp_path, monkeypatc
                "--precisions", "int8"])
     assert rc == 2
     assert "error" in capsys.readouterr().err.lower()
+
+
+# --------------------------------------------------------------------------
+# Phase 3 -- CLI surface. The library already accepts scorer, system_prompt
+# and labels; the CLI dropped them, so the capabilities were unreachable
+# from a workflow file. Progress output goes to stderr (stdout stays
+# parseable), and misclassified ids must reach the report so a red build can
+# be triaged.
+# --------------------------------------------------------------------------
+
+
+class _ContainsOnly(_Fake):
+    """Right answer only under a substring scorer.
+
+    Note the eval must contain at least one case this model gets right at
+    BOTH precisions, or both arms score 0% and the 0.00-point drop passes for
+    the wrong reason -- the same trap the --min-accuracy floor exists to close.
+    """
+
+    def answer(self, prompt: str) -> str:
+        return "yes" if prompt.startswith("q0") else "the answer is YES, clearly"
+
+
+def test_scorer_flag_selects_contains_matching(tmp_path, monkeypatch):
+    """With --scorer contains, 'the answer is YES' must match 'yes'.
+
+    Asserts on the MEASURED accuracy rather than the exit code: both arms of
+    this fake answer identically, so the drop is 0.00 points and the gate
+    correctly PASSes at either scorer -- the exit code cannot distinguish
+    them. Only the measured number can.
+    """
+    import contextlib
+    import io
+
+    def factory(*a, **kw):
+        return lambda precision: _ContainsOnly(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+
+    def accuracy_for(scorer_args):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            main(["--eval", _eval(tmp_path), "--model", "m", *scorer_args])
+        out = buf.getvalue()
+        # First data row is the baseline.
+        import re
+        m = re.search(r"\|\s*(\d+\.\d)%", out)
+        assert m, f"no accuracy in output: {out!r}"
+        return float(m.group(1))
+
+    exact_acc = accuracy_for([])
+    contains_acc = accuracy_for(["--scorer", "contains"])
+    assert exact_acc < contains_acc, (
+        f"the scorer flag did not change any measurement: "
+        f"exact={exact_acc}% contains={contains_acc}%"
+    )
+    assert contains_acc == 100.0, (
+        f"the contains scorer should match every case, got {contains_acc}%"
+    )
+
+
+
+def test_unknown_scorer_exits_2(tmp_path, monkeypatch):
+    """argparse rejects an unknown scorer before anything expensive runs.
+
+    SystemExit(2) is argparse's usage error, which maps to the same exit code
+    the CLI returns for bad configuration -- so the contract holds either way.
+    This pins that a typo'd --scorer cannot silently fall back to a default.
+    """
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    with pytest.raises(SystemExit) as exc:
+        main(["--eval", _eval(tmp_path), "--model", "m", "--scorer", "regex"])
+    assert exc.value.code == 2
+
+
+class _T:
+    """Minimal tensor stand-in: len, slicing, .to(), .shape, numel()."""
+
+    def __init__(self, ids):
+        self._ids = list(ids)
+
+    def __getitem__(self, k):
+        return _T(self._ids[k]) if isinstance(k, slice) else self._ids[k]
+
+    def __len__(self):
+        return len(self._ids)
+
+    def to(self, *a, **kw):
+        return self
+
+    @property
+    def shape(self):
+        return (1, len(self._ids))
+
+    def numel(self):
+        return len(self._ids)
+
+
+def test_labels_flag_reaches_the_logits_path(tmp_path, monkeypatch):
+    """--labels must be forwarded to the harness, not silently dropped."""
+    class _Tok:
+        def __call__(self, text, return_tensors=None):
+            return {"input_ids": _T([0] * 4)}
+
+    class _Cfg:
+        id2label = None
+
+    class _L:
+        logits = [[0.9, 0.1]]
+
+    class _LModel:
+        def __init__(self, precision):
+            self.precision = precision
+            self.tokenizer = _Tok()
+            self.config = _Cfg()
+
+        def eval(self):
+            return self
+
+        def __call__(self, **kw):
+            return _L()
+
+    captured = {}
+
+    real_init = QuantHarness.__init__
+
+    def spy_init(self, *a, **kw):
+        real_init(self, *a, **kw)
+        captured["labels"] = list(self.labels)
+
+    monkeypatch.setattr("quant_regress.cli.QuantHarness.__init__", spy_init)
+    monkeypatch.setattr(
+        "quant_regress.cli.build_model_factory",
+        lambda *a, **kw: (lambda precision: _LModel(precision)),
+    )
+    main(["--eval", _eval(tmp_path), "--model", "m", "--labels", "no, yes"])
+    assert captured.get("labels") == ["no", "yes"], captured
+
+
+def test_progress_output_goes_to_stderr_not_stdout(tmp_path, monkeypatch, capsys):
+    """Stdout must stay parseable; progress is a human affordance."""
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    main(["--eval", _eval(tmp_path, n=30), "--model", "m"])
+    captured = capsys.readouterr()
+    assert captured.out.count("precision") <= 1, (
+        "progress output polluted stdout -- a workflow parsing the table "
+        "would break"
+    )
+    assert "30" in captured.err or "case" in captured.err.lower(), (
+        f"no progress on stderr: {captured.err!r}"
+    )
+
+
+def test_report_includes_misclassified_ids(tmp_path, monkeypatch):
+    """A red build must name the cases that failed, or it cannot be triaged."""
+    out = tmp_path / "r.json"
+
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision, correct=(precision == "fp32"))
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    main(["--eval", _eval(tmp_path, n=4), "--model", "m", "--report", str(out)])
+    data = json.loads(out.read_text())
+    cand = data["candidates"][0]
+    assert "misclassified" in cand, f"report has no misclassified ids: {cand.keys()}"
+    assert sorted(cand["misclassified"]) == ["0", "1", "2", "3"]
+
+
+def test_output_format_junit_writes_valid_xml(tmp_path, monkeypatch):
+    out = tmp_path / "junit.xml"
+
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision, correct=(precision == "fp32"))
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path), "--model", "m",
+               "--output-format", "junit", "--junit-path", str(out)])
+    assert rc == 1
+    assert out.exists(), "no junit file was written"
+    import xml.etree.ElementTree as ET
+    root = ET.parse(out).getroot()
+    assert root.tag == "testsuite"
+    cases = root.findall("testcase")
+    assert len(cases) >= 2, f"expected one testcase per precision, got {len(cases)}"
+    # The failing arm must carry a failure element.
+    assert any(tc.find("failure") is not None for tc in cases), (
+        "the regressing precision produced no <failure> element"
+    )
+
+
+def test_unknown_output_format_exits_2(tmp_path, monkeypatch):
+    """Same contract as --scorer: argparse rejects it, exit code 2."""
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    with pytest.raises(SystemExit) as exc:
+        main(["--eval", _eval(tmp_path), "--model", "m",
+              "--output-format", "yaml"])
+    assert exc.value.code == 2, "an unknown format must not silently succeed"

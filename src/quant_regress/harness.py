@@ -150,6 +150,10 @@ class ComparisonResult:
                 "correct": self.baseline.correct,
                 "total": self.baseline.total,
                 "seconds": round(self.baseline.seconds, 3),
+                # Named failures make a red build triageable: which cases got
+                # worse is the first question anyone asks, and without the ids
+                # the only answer is "run it again locally".
+                "misclassified": list(self.baseline.misclassified),
             },
             "candidates": [
                 {
@@ -161,6 +165,7 @@ class ComparisonResult:
                     "drop_points": round(
                         (self.baseline.accuracy - c.accuracy) * 100.0, 3
                     ),
+                    "misclassified": list(c.misclassified),
                 }
                 for c in self.candidates
             ],
@@ -198,6 +203,7 @@ class QuantHarness:
         scorer: Callable[[str, str], bool] | None = None,
         system_prompt: str | None = None,
         labels: Sequence[str] | None = None,
+        progress: Callable[[int, int, str], None] | None = None,
     ):
         if scorer is None:
             def scorer(pred: str, expected: str) -> bool:
@@ -208,6 +214,9 @@ class QuantHarness:
         self.system_prompt = system_prompt
         # Label set for models that expose only logits and carry no id2label.
         self.labels = list(labels) if labels else []
+        # Called as progress(done, total, precision) after each case. The CLI
+        # passes a stderr writer; a library caller can leave it unset.
+        self._progress = progress
 
     # -- public -----------------------------------------------------------
     def compare(
@@ -258,8 +267,10 @@ class QuantHarness:
                 "quantized model. Pass e.g. candidate_precisions=['int8']."
             )
 
-        baseline = self._measure(eval_set, baseline_precision)
-        candidates = [self._measure(eval_set, p) for p in candidate_precisions]
+        baseline = self._measure(eval_set, baseline_precision, self._progress)
+        candidates = [
+            self._measure(eval_set, p, self._progress) for p in candidate_precisions
+        ]
 
         # Every precision must have scored the whole set, or the comparison
         # is meaningless. Refuse rather than report a partial number.

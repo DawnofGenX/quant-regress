@@ -136,6 +136,7 @@ def build_model_factory(
     model_name: str,
     cache_dir: str | None = None,
     max_new_tokens: int = 32,
+    hf_token: str | None = None,
 ) -> Callable[[str], object]:
     if not model_name or not model_name.strip():
         raise AdapterError(
@@ -151,6 +152,10 @@ def build_model_factory(
                 f"unsupported precision {precision!r}; supported: {SUPPORTED}"
             )
         kwargs = {"cache_dir": cache_dir} if cache_dir else {}
+        # A gated repository needs credentials; without them from_pretrained
+        # fails with a 401 that reads like a bad model id.
+        if hf_token:
+            kwargs["token"] = hf_token
         try:
             tok = AutoTokenizer.from_pretrained(name, **kwargs)
             model = AutoModelForCausalLM.from_pretrained(name, **kwargs)
