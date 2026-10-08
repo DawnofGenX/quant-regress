@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import weakref
 
 import pytest
 
@@ -292,10 +293,103 @@ def test_empty_candidate_list_is_rejected_before_any_model_is_built(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# The gate reports CHANGE. Without a floor it also rubber-stamps a model that
-# is simply wrong at every precision: measured, 0/10 at both precisions yields a
-# 0.00-point drop and a PASS, i.e. a green build for a useless model.
+# Phase 2 -- robustness. The gate runs real models on real CI runners, so a
+# crash or an OOM is a broken build. Each guard here was MEASURED to be
+# missing (the bug re-introduced, the test going red) before the fix landed.
 # --------------------------------------------------------------------------
+
+
+class _Tracked:
+    """Answers deterministically; liveness is observable via a weakref.
+
+    Two details make this able to detect a real leak:
+
+    * the registry holds *weakrefs*, since a strong reference would pin the
+      model forever and hide the bug; and
+    * ``__init__`` builds a reference cycle (``child.parent is self``), which
+      is what a real torch module graph is — a parent module holding
+      submodules that hold a back-reference. Without the cycle, CPython's
+      refcounting frees the model the instant ``_measure`` returns and the
+      test passes even with the fix removed.
+
+    Verified load-bearing both ways: with the cycle present and the
+    ``del``/``gc.collect()`` removed, both models stay resident.
+    """
+
+    alive: list = []
+
+    def __init__(self, precision: str):
+        self.precision = precision
+        self.child = _Cycle()
+        self.child.parent = self  # a module graph holds its children and back
+        _Tracked.alive.append(weakref.ref(self))
+
+    def eval(self):
+        return self
+
+    def answer(self, prompt: str) -> str:
+        return "yes"
+
+    @classmethod
+    def live_count(cls) -> int:
+        return sum(1 for r in cls.alive if r() is not None)
+
+
+class _Cycle:
+    """Stand-in for a submodule pointing back at its parent."""
+
+    parent: object = None
+
+
+def test_models_are_freed_between_precisions(tmp_path):
+    """Each precision's model must be released before the next is built.
+
+    Two precisions means two models alive at the same time. For a 7B
+    checkpoint that is ~28 GB of resident weights on a runner with far less,
+    so the gate OOMs instead of reporting a verdict. The fix releases the
+    previous model (and runs gc) as soon as its measurement finishes.
+
+    Verified load-bearing: with the `del`/`gc.collect()` removed, both models
+    stay alive simultaneously and this fails.
+    """
+    _Tracked.alive.clear()
+    es = _eval(tmp_path, n=3)
+    h = QuantHarness(model_factory=lambda p: _Tracked(p))
+    h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"])
+
+    assert len(_Tracked.alive) == 2, _Tracked.alive
+    # The baseline is done by the time the candidate is measured, so only the
+    # model currently in use may still be alive.
+    assert _Tracked.live_count() <= 1, (
+        f"{_Tracked.live_count()} models still resident after their "
+        "measurements finished -- two precisions means two models in memory "
+        "at once"
+    )
+
+
+def test_models_are_freed_when_a_measurement_raises(tmp_path):
+    """A failure mid-run must not leak the model that was being measured.
+
+    The scorer raises, so `_measure` exits early. Without a `finally`, that
+    model is never released and repeated failures leak memory until the
+    runner dies -- a failure mode that looks like a flake, not a bug.
+    """
+    _Tracked.alive.clear()
+    es = _eval(tmp_path, n=3)
+
+    def boom(pred, expected):
+        raise RuntimeError("scorer exploded")
+
+    h = QuantHarness(model_factory=lambda p: _Tracked(p), scorer=boom)
+    with pytest.raises(RuntimeError):
+        h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"])
+    assert len(_Tracked.alive) >= 1
+    assert _Tracked.live_count() == 0, (
+        "the model being measured was not released when the run raised"
+    )
+
+
+
 
 
 class _AlwaysWrong:

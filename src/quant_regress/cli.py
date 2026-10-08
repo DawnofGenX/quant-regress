@@ -114,10 +114,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n{res.floor_failure}")
 
     if args.report:
-        Path(args.report).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.report).write_text(
-            json.dumps(res.to_dict(), indent=2) + "\n", encoding="utf-8"
-        )
+        try:
+            Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.report).write_text(
+                json.dumps(res.to_dict(), indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError as exc:
+            # The measurement is done and the verdict is in hand. An
+            # unhandled OSError here would traceback out of main() and, on
+            # CI, surface as exit 1 -- "accuracy regressed" -- for what is
+            # actually a disk problem. Report it as a usage error instead.
+            print(
+                f"error: could not write the report to {args.report}: {exc}",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
 
     return EXIT_OK if res.verdict is Verdict.PASS else EXIT_REGRESSION
 

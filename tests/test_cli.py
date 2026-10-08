@@ -66,6 +66,42 @@ def test_writes_json_report(tmp_path, monkeypatch):
     assert "baseline" in data and "candidates" in data and "verdict" in data
 
 
+def test_report_is_written_even_when_the_path_is_a_directory(
+    tmp_path, monkeypatch, capsys
+):
+    """An unwritable report path must not traceback after the work is done.
+
+    The measurement completed; if `Path.write_text` raises an unhandled
+    OSError the CLI dies with a traceback instead of reporting the verdict it
+    already has. Exit 2 (could not record), never 1 (regressed).
+    """
+    blocker = tmp_path / "report.json"
+    blocker.mkdir()  # a directory cannot be written as a file
+
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path), "--model", "fake-model",
+               "--report", str(blocker)])
+    assert rc == 2, "an unwritable --report must exit 2, never 1"
+    assert "report" in capsys.readouterr().err.lower()
+
+
+def test_report_parent_directory_is_created(tmp_path, monkeypatch):
+    """`--report out/nested/r.json` must not fail because out/ does not exist."""
+    out = tmp_path / "out" / "nested" / "r.json"
+
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path), "--model", "fake-model",
+               "--report", str(out)])
+    assert rc == 0
+    assert out.exists(), "the report's parent directories were not created"
+
+
 def test_missing_model_argument_exits_2(tmp_path, monkeypatch):
     def factory(*a, **kw):
         return lambda precision: _Fake(precision)
@@ -238,3 +274,93 @@ def test_floor_breach_is_recorded_in_the_json_report(tmp_path, monkeypatch):
     assert data["min_accuracy"] == 0.5
     assert data["baseline_below_floor"] is True
     assert data["verdict"] == "fail"
+
+
+# --------------------------------------------------------------------------
+# Phase 2 #7: a broken model must exit 2, not traceback.
+#
+# A model whose tokenizer returns junk, or whose generate() raises, currently
+# escapes main() as a raw traceback. On CI that surfaces as exit 1 -- the code
+# that means "accuracy regressed" -- so a broken model impersonates a real
+# regression and teaches people to ignore the one exit code that matters.
+# --------------------------------------------------------------------------
+
+
+class _BrokenTokenizer:
+    def __call__(self, text, return_tensors=None):
+        raise TypeError("tokenizer exploded")
+
+
+class _BrokenGenerate:
+    """Shape 1 (generate + tokenizer), where generate() raises."""
+
+    tokenizer = _BrokenTokenizer()
+
+    def eval(self):
+        return self
+
+    def generate(self, **kwargs):
+        raise AttributeError("no .logits on this thing")
+
+
+def test_broken_model_exits_2_not_a_traceback(tmp_path, monkeypatch, capsys):
+    """A model that cannot produce a prediction is a config error, not a FAIL.
+
+    Without the wrapper this test fails with TypeError escaping main().
+    """
+    def factory(*a, **kw):
+        return lambda precision: _BrokenGenerate()
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path), "--model", "fake-model",
+               "--precisions", "int8"])
+    assert rc == 2, "a broken model must exit 2, never 0 or 1"
+    err = capsys.readouterr().err
+    assert "error" in err.lower(), f"expected an actionable message, got {err!r}"
+
+
+class _BrokenLogits:
+    """Shape 3 (logits): returns a tensor without .logits at all."""
+
+    def __init__(self, precision):
+        self.precision = precision
+        self.tokenizer = _BrokenTokenizer()
+
+    def eval(self):
+        return self
+
+    def __call__(self, **kw):
+        raise AttributeError("model has no .logits")
+
+
+def test_broken_logits_model_exits_2(tmp_path, monkeypatch, capsys):
+    def factory(*a, **kw):
+        return lambda precision: _BrokenLogits(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path), "--model", "fake-model",
+               "--precisions", "int8"])
+    assert rc == 2
+    assert "error" in capsys.readouterr().err.lower()
+
+
+class _ModelWithoutAnswer:
+    """The old hard failure: no .answer(), no generate, no id2label."""
+
+    def __init__(self, precision):
+        self.precision = precision
+
+    def eval(self):
+        return self
+
+
+def test_model_that_cannot_produce_text_exits_2_not_a_crash(tmp_path, monkeypatch, capsys):
+    """Already raised RuntimeError; now it must also exit 2 cleanly."""
+    def factory(*a, **kw):
+        return lambda precision: _ModelWithoutAnswer(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path), "--model", "fake-model",
+               "--precisions", "int8"])
+    assert rc == 2
+    assert "error" in capsys.readouterr().err.lower()

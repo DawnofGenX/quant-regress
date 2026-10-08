@@ -28,6 +28,7 @@ from quant_regress.adapter import (
     AdapterError,
     _count_quantized,
     _quantizable_weight_modules,
+    _quantize_int8,
     build_model_factory,
 )
 
@@ -110,6 +111,102 @@ def test_factory_rejects_unknown_precision():
 def test_empty_model_name_is_rejected_with_actionable_message():
     with pytest.raises(AdapterError, match="model"):
         build_model_factory(model_name="")
+
+
+# --------------------------------------------------------------------------
+# Robustness: peak memory. quantize_dynamic returns a NEW model, so the fp32
+# original stays referenced inside the factory's local scope unless it is
+# explicitly dropped. For a 7B checkpoint that is 14 GB of weights held for
+# no reason, and on a runner with less than 28 GB the gate dies with an OOM
+# instead of reporting a verdict.
+# --------------------------------------------------------------------------
+
+
+def test_original_model_is_released_after_quantization(monkeypatch):
+    """The fp32 source must not stay alive once `quantized` exists.
+
+    Verified load-bearing: with the `del model` removed the weakref stays
+    alive and this fails.
+    """
+    import gc
+    import weakref
+
+    built: list[object] = []
+
+    real_quantize = torch.ao.quantization.quantize_dynamic
+
+    def spy_quantize(model, *a, **kw):
+        built.append(weakref.ref(model))
+        return real_quantize(model, *a, **kw)
+
+    monkeypatch.setattr(
+        "quant_regress.adapter.torch.ao.quantization.quantize_dynamic",
+        spy_quantize,
+    )
+    factory = build_model_factory(model_name=BERT)
+    int8 = factory("int8")
+
+    assert built, "quantize_dynamic was never called"
+    gc.collect()
+    still_alive = [r for r in built if r() is not None]
+    assert not still_alive, (
+        f"{len(still_alive)} fp32 model(s) still resident after quantization: "
+        "peak memory is ~2x the model size for no reason"
+    )
+    # The quantized result is the thing the harness gets, and it must work.
+    assert _count_quantized(int8) >= 8
+
+
+# --------------------------------------------------------------------------
+# The quantize guard must fire on its own signal. `and blocked:` made the
+# refusal depend on a SECOND condition that a small nn.Linear model does not
+# satisfy: it has no blocked module types, so it passed with only a handful
+# of Linear layers swapped -- an "int8" arm that is fp32 in all but name,
+# and a comparison of a model against itself.
+# --------------------------------------------------------------------------
+
+
+def _tiny_linear_model(n_layers: int):
+    """A small model whose weight layers are ALL nn.Linear.
+
+    Built directly from nn.Linear rather than from a BERT config, because
+    BERT's ``BertLMPredictionHead`` wraps its Linear in a container that
+    ``_quantizable_weight_modules`` correctly reports as blocked — which
+    would make this test exercise the already-covered architecture instead
+    of the gap it is meant to close.
+    """
+    import torch.nn as nn
+
+    class _Plain(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList(
+                nn.Linear(32, 32) for _ in range(n_layers)
+            )
+            self.head = nn.Linear(32, 32)
+
+        def forward(self, x):
+            for layer in self.layers:
+                x = layer(x)
+            return self.head(x)
+
+    return _Plain()
+
+
+
+def test_a_model_with_too_few_quantized_modules_is_refused():
+    """Few swapped modules must be refused even when nothing is 'blocked'.
+
+    This is the gap: the old guard required `blocked` to be non-empty, so a
+    model whose weight layers are all nn.Linear (nothing blocked) sailed
+    through with only a few modules swapped.
+    """
+    small = _tiny_linear_model(1)
+    blocked = _quantizable_weight_modules(small)
+    assert blocked == {}, f"expected no blocked types, got {blocked}"
+    with pytest.raises(AdapterError, match="quantize|module|Linear"):
+        _quantize_int8(small)
+
 
 
 def test_unsupported_architecture_is_exit_code_2_not_a_crash():

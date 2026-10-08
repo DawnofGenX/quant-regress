@@ -15,6 +15,7 @@ failure is silent — see ``_quantizable_weight_modules`` below.
 
 from __future__ import annotations
 
+import gc
 from typing import Callable
 
 import torch
@@ -87,27 +88,46 @@ def _quantize_int8(model):
 
     Raises :class:`AdapterError` when the architecture's weight-bearing blocks
     cannot be swapped by ``quantize_dynamic`` (GPT-2 and friends use
-    ``transformers.pytorch_utils.Conv1D``). Quantizing anyway would produce an
-    "int8" arm that is really fp32, and the harness would then compare a model
-    against itself and report a 0.00-point drop — a silent pass on an
-    unquantized model, which is the worst possible failure for a gate.
+    ``transformers.pytorch_utils.Conv1D``), or when too few modules were
+    actually swapped. Quantizing anyway would produce an "int8" arm that is
+    really fp32, and the harness would then compare a model against itself and
+    report a 0.00-point drop — a silent pass on an unquantized model, which is
+    the worst possible failure for a gate.
+
+    The refusal is keyed on the swap count, NOT on whether a blocked module
+    type was also found. An earlier version required
+
+        if swapped < _MIN and blocked:
+
+    which made the guard depend on a second condition. A model whose weight
+    layers are all ``nn.Linear`` has ``blocked == {}`` by construction, so it
+    could never trip the second term no matter how few modules were swapped —
+    a small encoder with a handful of Linear layers was accepted, its "int8"
+    arm was fp32 in all but name, and the gate compared a model against itself.
     """
-    blocked = _quantizable_weight_modules(model)
     quantized = torch.ao.quantization.quantize_dynamic(
         model, {torch.nn.Linear}, dtype=torch.qint8
     )
     swapped = _count_quantized(quantized)
 
-    if swapped < _MIN_QUANTIZED_MODULES and blocked:
-        detail = ", ".join(f"{n} x {k}" for k, n in sorted(blocked.items()))
+    if swapped < _MIN_QUANTIZED_MODULES:
+        blocked = _quantizable_weight_modules(model)
+        detail = ""
+        if blocked:
+            detail = (
+                " Its weight layers use module types torch's quantize_dynamic "
+                "cannot replace (" + ", ".join(
+                    f"{n} x {k}" for k, n in sorted(blocked.items())
+                ) + ")."
+            )
         raise AdapterError(
-            f"cannot quantize this architecture with dynamic INT8: its weight "
-            f"layers use module types torch's quantize_dynamic cannot replace "
-            f"({detail}). Only {swapped} module(s) were quantized, so the "
-            f"'int8' arm would be fp32 in the transformer body and the "
-            f"comparison would measure a model against itself. "
-            f"Use an nn.Linear-based architecture (BERT/DeBERTa/Llama/Mistral), "
-            f"or quantize it outside this tool and pass a pre-quantized model."
+            f"cannot certify this architecture as quantized with dynamic INT8: "
+            f"only {swapped} module(s) were swapped, below the "
+            f"{_MIN_QUANTIZED_MODULES} needed for the 'int8' arm to differ "
+            f"from fp32.{detail} The comparison would measure a model against "
+            f"itself and report a 0.00-point drop. Use a larger nn.Linear-based "
+            f"architecture (BERT/DeBERTa/Llama/Mistral), or quantize it outside "
+            f"this tool and pass a pre-quantized model."
         )
     return quantized
 
@@ -141,7 +161,16 @@ def build_model_factory(
                 "(a 1B model is ~2 GB, a 7B model is ~14 GB)."
             ) from exc
         if p == "int8":
-            model = _quantize_int8(model)
+            # quantize_dynamic RETURNS a new model; the fp32 original stays
+            # referenced by this local `model` name until it is overwritten.
+            # Overwriting it alone is not enough for a real torch module
+            # graph, whose parent/child reference cycles keep the weights
+            # alive until the collector runs — so the original is dropped and
+            # a collection is forced here, while the peak is still in scope.
+            quantized = _quantize_int8(model)
+            del model
+            gc.collect()
+            model = quantized
         # quantize_dynamic emits CPU-only kernels.
         model = model.to("cpu").eval()
         model.tokenizer = tok  # attached for the harness

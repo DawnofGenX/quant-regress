@@ -8,6 +8,7 @@ scoring every case at every precision and refusing to report a partial run.
 
 from __future__ import annotations
 
+import gc
 import math
 import time
 from dataclasses import dataclass, field
@@ -172,6 +173,17 @@ class ComparisonResult:
         }
 
 
+class RegressError(RuntimeError):
+    """A model could not be made to produce an answer.
+
+    Subclasses ``RuntimeError`` so the CLI's existing handler catches it and
+    exits 2 -- the code meaning "bad configuration / could not measure".
+    Letting the underlying ``TypeError``/``AttributeError`` escape instead
+    makes it exit 1, the code meaning "accuracy regressed", which is a
+    broken model impersonating a real regression.
+    """
+
+
 class QuantHarness:
     """Measures task accuracy for a model at each requested precision.
 
@@ -289,25 +301,51 @@ class QuantHarness:
         )
 
     # -- internals --------------------------------------------------------
-    def _measure(self, eval_set: EvalSet, precision: str) -> PrecisionResult:
+    def _measure(
+        self,
+        eval_set: EvalSet,
+        precision: str,
+        progress: Callable[[int, int, str], None] | None = None,
+    ) -> PrecisionResult:
+        """Score the whole set at one precision, then release the model.
+
+        The model is released in a `finally`, so a scorer that raises mid-run
+        cannot leak it. Two precisions means two models: a 7B checkpoint is
+        ~14 GB of weights, and holding both at once OOMs the runner instead of
+        producing a verdict — a failure that looks like a flake rather than a
+        bug.
+        """
         model = self._factory(precision)
-        tok = getattr(model, "tokenizer", None)
-        correct = 0
-        mis: list[str] = []
-        t0 = time.perf_counter()
-        for case in eval_set:
-            pred = self._predict(model, tok, case.prompt)
-            ok = self._scorer(pred, case.expected)
-            correct += int(ok)
-            if not ok:
-                mis.append(case.id)
-        return PrecisionResult(
-            precision=precision,
-            correct=correct,
-            total=len(eval_set),
-            seconds=time.perf_counter() - t0,
-            misclassified=mis,
-        )
+        tok = None
+        try:
+            tok = getattr(model, "tokenizer", None)
+            correct = 0
+            mis: list[str] = []
+            t0 = time.perf_counter()
+            for i, case in enumerate(eval_set, 1):
+                pred = self._predict(model, tok, case.prompt)
+                ok = self._scorer(pred, case.expected)
+                correct += int(ok)
+                if not ok:
+                    mis.append(case.id)
+                if progress is not None:
+                    progress(i, len(eval_set), precision)
+            return PrecisionResult(
+                precision=precision,
+                correct=correct,
+                total=len(eval_set),
+                seconds=time.perf_counter() - t0,
+                misclassified=mis,
+            )
+        finally:
+            # Drop the local reference and force the collection cycle: the
+            # caching allocator only returns blocks once the module graph has
+            # no more references, and a dangling tensor in an exception
+            # traceback is enough to keep the whole model resident.
+            del model
+            if tok is not None:
+                del tok
+            gc.collect()
 
     def _predict(self, model, tok, prompt: str) -> str:
         """Return the model's answer as text.
@@ -340,6 +378,31 @@ class QuantHarness:
         call, not this function's: a prompt asking for a one-word answer and an
         ``expected`` of ``"Paris"`` now works, and a chatty model can still be
         matched by passing a custom ``scorer``.
+
+        Any unexpected failure inside the model is re-raised as
+        :class:`RegressError` (a ``RuntimeError``), so the CLI turns it into
+        exit 2 instead of a traceback. A raw ``TypeError`` or
+        ``AttributeError`` from a broken model currently escapes main() and
+        exits 1 -- the code meaning "accuracy regressed".
+        """
+        try:
+            return self._predict_one(model, tok, prompt)
+        except RegressError:
+            raise
+        except Exception as exc:
+            raise RegressError(
+                f"model at {getattr(model, 'precision', '?')!r} could not "
+                f"produce an answer for prompt {prompt[:60]!r}: "
+                f"{type(exc).__name__}: {exc}. The gate could not measure this "
+                f"model, so it will not guess a verdict. Check that the model "
+                f"and its tokenizer load and match this eval set's format."
+            ) from exc
+
+    def _predict_one(self, model, tok, prompt: str) -> str:
+        """The three supported model shapes, in priority order.
+
+        Kept separate from :meth:`_predict` so the wrapper's except clause
+        cannot swallow its own error type.
         """
         # 2. explicit text answer
         answer = getattr(model, "answer", None)
@@ -361,7 +424,7 @@ class QuantHarness:
 
         # 3. logits -> label
         if tok is None:
-            raise RuntimeError(
+            raise RegressError(
                 "cannot evaluate a logits-only model without a tokenizer: "
                 "the prompt cannot be tokenized. Attach a tokenizer to the "
                 "model (model.tokenizer = ...) or use a model with .answer()."
@@ -378,7 +441,7 @@ class QuantHarness:
             return str(id2label.get(idx, idx))
         if self.labels:
             return str(self.labels[idx]) if idx < len(self.labels) else str(idx)
-        raise RuntimeError(
+        raise RegressError(
             "cannot map model output to text: the model exposes no .answer(), "
             "no generate()+tokenizer, and no id2label. Give the fake model an "
             "answer(prompt) method, or pass labels=[...] to QuantHarness."
