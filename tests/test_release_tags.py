@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
 INIT = ROOT / "src" / "quant_regress" / "__init__.py"
 VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"', re.M)
-TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+TAG_RE = re.compile(r"^v((\d+)\.(\d+)\.(\d+))$")
 
 
 def _run(*args: str) -> str | None:
@@ -98,10 +98,12 @@ def _tag_points_at_version(tags: set[str]) -> None:
         at_tag = _run("show", f"{tag}:pyproject.toml")
         if at_tag is None:
             continue
-        m = VERSION_RE.search(at_tag)
-        assert m, f"{tag}: pyproject.toml has no version"
-        got = m.group(1)
-        want = TAG_RE.match(tag).group(0)[1:]
+        declared = VERSION_RE.search(at_tag)
+        assert declared, f"{tag}: pyproject.toml has no version"
+        got = declared.group(1)
+        tm = TAG_RE.match(tag)
+        assert tm, tag
+        want = tm.group(1)
         assert got == want, (
             f"tag {tag} points at a commit whose pyproject.toml declares "
             f"{got!r}, not {want!r}. PyPI would 400 with 'File already exists' "
