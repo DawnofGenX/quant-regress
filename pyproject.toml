@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quant-regress"
-version = "1.0.1"
+version = "1.0.2"
 description = "Fail CI when quantization costs you task accuracy. Task-level regression testing for quantized models."
 readme = "README.md"
 requires-python = ">=3.10"

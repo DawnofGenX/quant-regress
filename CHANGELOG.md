@@ -4,6 +4,35 @@ All notable changes to quant-regress. This project is pre-1.0 stable in API but 
 `v1` GitHub Action tag is what users are told to pin, so **action-visible changes are
 called out here as breaking**.
 
+## 1.0.2 — pinned at `v1`
+
+### Fixed
+
+- **A baseline equal to a candidate was silently accepted**, so the harness compared
+  a model against itself, produced a 0.0-point drop, and reported PASS having measured
+  no quantization at all. Now refused before any model loads.
+- **The logits path ignored the prompt.** It passed `input_ids=[[1]]` regardless of
+  the question, so every case got the same prediction and the comparison was
+  meaningless; a tokenizer-less logits model was scored on that dummy input. The
+  prompt is tokenized now, and such a model is refused with an actionable error.
+- **A non-UTF-8 eval set crashed with `UnicodeDecodeError`** (exit `1` — the code
+  meaning "accuracy regressed", so a bad file impersonated a real regression), and a
+  JSON row that was not an object surfaced as a bare `KeyError`. Both raise
+  `EvalSetError` naming the line and showing a valid example row.
+- **The `v1.0.1` release failed to publish**: its tag pointed at a commit whose
+  `pyproject.toml` still declared `0.1.1`, so PyPI rejected the duplicate wheel with
+  `400 File already exists`. The tag has been re-cut at the version bump, and a
+  release test now fails if a version tag ever points at a commit carrying a different
+  version.
+
+### Fixed in the test suite
+
+- `test_logits_only_model_uses_labels_not_a_stringified_logit` exercised the dummy
+  input the fix removes, so it could not fail on the bug it guards. It now supplies a
+  tokenizer and keeps its real assertion — that `id2label` yields `"no"` rather than the
+  stringified logit `"0.9"`. Every guard added here was verified load-bearing by
+  re-introducing the bug and confirming the run goes red, then green on restore.
+
 ## Unreleased — pinned at `v1` as of 2026-10-07
 
 The `v1` tag was moved from `53402e8` to `05b0135` so that the ref the README tells
