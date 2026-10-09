@@ -571,3 +571,46 @@ def test_unknown_output_format_exits_2(tmp_path, monkeypatch):
         main(["--eval", _eval(tmp_path), "--model", "m",
               "--output-format", "yaml"])
     assert exc.value.code == 2, "an unknown format must not silently succeed"
+
+
+def test_markdown_table_has_a_row_per_precision_with_drops():
+    """`_markdown` is the DEFAULT text output -- its numbers must be the real
+    ones. A wrong or missing drop column makes a red build unreadable, and the
+    default path previously had no direct assertion at all."""
+    from quant_regress.cli import _markdown
+    from quant_regress.harness import ComparisonResult, PrecisionResult, Verdict
+
+    res = ComparisonResult(
+        baseline=PrecisionResult("fp32", correct=9, total=10, seconds=0.0),
+        candidates=[
+            PrecisionResult("int8", correct=9, total=10, seconds=0.0),
+            PrecisionResult("int4", correct=4, total=10, seconds=0.0),
+        ],
+        max_drop_points=2.0,
+        verdict=Verdict.FAIL,
+    )
+    lines = _markdown(res).splitlines()
+    assert lines[0] == "| precision | accuracy | correct | drop |"
+    assert lines[1] == "|---|---|---|---|"
+    # One row per candidate, plus the baseline row, each carrying the real
+    # numbers and a signed drop in points.
+    assert "| fp32 (baseline) | 90.0% | 9/10 | — |" in lines
+    assert "| int8 | 90.0% | 9/10 | +0.0 pts |" in lines
+    assert "| int4 | 40.0% | 4/10 | +50.0 pts |" in lines
+    assert len(lines) == 2 + 1 + len(res.candidates)
+
+
+def test_text_output_reflects_the_run_in_stdout(tmp_path, monkeypatch, capsys):
+    """The default (text) run must print the measured accuracies and drop to
+    stdout, not a placeholder. This is the path every local user sees."""
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision, correct=(precision == "fp32"))
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path, n=6), "--model", "m",
+               "--max-drop-points", "5"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "| fp32 (baseline) | 100.0% | 6/6 | — |" in out
+    assert "| int8 | 0.0% | 0/6 | +100.0 pts |" in out
+    assert "worst drop: +100.00 pts" in out

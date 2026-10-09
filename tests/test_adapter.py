@@ -125,8 +125,14 @@ def test_empty_model_name_is_rejected_with_actionable_message():
 def test_original_model_is_released_after_quantization(monkeypatch):
     """The fp32 source must not stay alive once `quantized` exists.
 
-    Verified load-bearing: with the `del model` removed the weakref stays
-    alive and this fails.
+    Load-bearing only for a model that participates in a reference cycle, which
+    real torch modules do (parameter -> module -> parameter graphs). Plain
+    refcounting frees an *acyclic* model the moment `del model` drops the last
+    reference, so with a cycle-free tiny checkpoint this test passed even with
+    the factory's `gc.collect()` deleted -- the guard was untested. The spy
+    therefore installs a cycle, automatic GC is disabled, and no test-side
+    collect runs: only the factory's own collect can reclaim the model. Delete
+    the `gc.collect()` in adapter.factory and this fails with 1 alive.
     """
     import gc
     import weakref
@@ -136,6 +142,9 @@ def test_original_model_is_released_after_quantization(monkeypatch):
     real_quantize = torch.ao.quantization.quantize_dynamic
 
     def spy_quantize(model, *a, **kw):
+        # Simulate the reference cycle a real module graph carries, so the
+        # explicit collect is the only thing that can reclaim it.
+        model.__dict__["_cycle"] = model
         built.append(weakref.ref(model))
         return real_quantize(model, *a, **kw)
 
@@ -143,12 +152,19 @@ def test_original_model_is_released_after_quantization(monkeypatch):
         "quant_regress.adapter.torch.ao.quantization.quantize_dynamic",
         spy_quantize,
     )
-    factory = build_model_factory(model_name=BERT)
-    int8 = factory("int8")
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        factory = build_model_factory(model_name=BERT)
+        int8 = factory("int8")
+        # Deliberately NO gc.collect() here: rely on the factory's own.
+        still_alive = [r for r in built if r() is not None]
+    finally:
+        if was_enabled:
+            gc.enable()
+        gc.collect()
 
     assert built, "quantize_dynamic was never called"
-    gc.collect()
-    still_alive = [r for r in built if r() is not None]
     assert not still_alive, (
         f"{len(still_alive)} fp32 model(s) still resident after quantization: "
         "peak memory is ~2x the model size for no reason"
