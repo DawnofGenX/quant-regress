@@ -163,3 +163,5 @@ error (exit `2`), because the tool measured correctly and the answer is simply n
   `tests/test_selftest_gate.py`.
 - No published adoption yet. If you use it, an issue saying what you quantized
   and what broke is genuinely useful.
+
+More writing on this stack: https://dev.to/dawnofgenx
