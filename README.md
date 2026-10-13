@@ -2,18 +2,15 @@
 
 Fail CI when quantization costs you task accuracy.
 
-> **If you pinned `@v1` before 2026-10-07, re-sync.** That tag has moved to pick up
-> five correctness fixes, including one where the gate reported PASS for a model it had
-> never actually quantized. See [`CHANGELOG.md`](CHANGELOG.md).
 
 Token-level proxies — perplexity, KL divergence — routinely report that a
 quantized model is fine. Task accuracy does not, provided you actually measure
 it. This action measures a task eval at each precision and fails the build when
 accuracy drops past a threshold you set.
 
-## Why
-
-<!-- claim:int8-collapse -->
+> **If you pinned `@v1` before 2026-10-07, re-sync.** That tag has moved to pick up
+> five correctness fixes, including one where the gate reported PASS for a model it had
+> never actually quantized. See [`CHANGELOG.md`](CHANGELOG.md).
 On a cross-encoder claim verifier, dynamic INT8 quantization left aggregate
 accuracy looking survivable while destroying the capability that mattered:
 
