@@ -17,8 +17,14 @@ class EvalSetError(ValueError):
     """Raised when an eval set is malformed. Always names the offending row."""
 
 
-def normalise(text: str) -> str:
-    """Lowercase, strip, and collapse internal whitespace."""
+def normalise(text: object) -> str:
+    """Lowercase, strip, and collapse internal whitespace.
+
+    ``text`` is typed ``object`` rather than ``str`` because JSON lets a
+    row's ``id``, ``prompt`` and ``expected`` be any scalar, and the
+    ``str()`` here is what keeps a number, a boolean or a null from
+    reaching an ``AttributeError`` inside the scorer.
+    """
     return " ".join(str(text).split()).strip().lower()
 
 

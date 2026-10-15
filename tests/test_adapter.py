@@ -173,6 +173,44 @@ def test_original_model_is_released_after_quantization(monkeypatch):
     assert _count_quantized(int8) >= 8
 
 
+def test_count_quantized_reports_zero_for_an_unquantized_model():
+    """_count_quantized must be 0 on an fp32 model, not a false positive.
+
+    This is the number the guard's whole threshold rests on. If it ever
+    counted a plain ``nn.Linear`` as quantized, the guard would silently
+    pass an architecture whose "int8" arm is fp32 in all but name.
+    """
+    model = _tiny_linear_model(3)
+    assert _count_quantized(model) == 0, (
+        "an unquantized fp32 model reported quantized modules: the swap "
+        "counter cannot distinguish fp32 from int8, so the guard's "
+        "threshold is meaningless"
+    )
+
+
+def test_count_quantized_rises_once_quantized():
+    """The counter must actually see the swap, or the guard measures 0.
+
+    A counter that always returned 0 would make the guard refuse every
+    model; one that always returned a high number would accept any model.
+    Pin both directions. Calls ``quantize_dynamic`` directly rather than
+    ``_quantize_int8``, because this small model is legitimately below the
+    guard's 8-module floor and that is a DIFFERENT property.
+    """
+    import torch
+    from torch.ao.quantization import quantize_dynamic
+
+    model = _tiny_linear_model(2)
+    assert _count_quantized(model) == 0
+    quantized = quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
+    # 2 stack layers + the head Linear.
+    assert _count_quantized(quantized) == 3, (
+        "quantize_dynamic swapped 3 modules but the counter read "
+        f"{_count_quantized(quantized)}: the guard's threshold is measured "
+        "by a counter that cannot see what it is counting"
+    )
+
+
 # --------------------------------------------------------------------------
 # The quantize guard must fire on its own signal. `and blocked:` made the
 # refusal depend on a SECOND condition that a small nn.Linear model does not

@@ -60,6 +60,11 @@ quant-regress --eval evals/tasks.jsonl \
 
 Exit codes: `0` within tolerance, `1` accuracy regressed, `2` bad configuration.
 
+`--dry-run` checks the whole configuration and exits **without downloading a
+model** — a typo'd precision, a baseline equal to a candidate, or a broken eval
+set costs milliseconds instead of a multi-GB download. `--version` prints the
+installed version, for pinning a ref or filing a bug.
+
 ### Outputs
 
 `--report` writes JSON containing every arm's accuracy, the drop in points, and the
@@ -84,6 +89,16 @@ tool runs on arbitrary PRs, and evaluating one would be code execution.
 `--labels "no,yes"` names the classes for a logits-only model with no `id2label`.
 `--system-prompt` prepends a prompt to every case. `--hf-token` (or `$HF_TOKEN`)
 authenticates a gated model.
+
+### Chat models
+
+An instruction-tuned checkpoint is prompted through **its own chat template**, not
+by pasting text. A base model's tokenizer has no template, so it keeps the plain
+concatenation — `--system-prompt` behaves as before. This matters because a chat
+model fed a hand-pasted prompt answers conversationally rather than with the
+expected token, so the accuracy being measured would be the accuracy of a broken
+prompt, and the marginal-decision damage this tool exists to detect would be
+invisible.
 
 **`--min-accuracy` is worth setting.** Without it the gate only measures *change*, so a
 model that is wrong at every precision yields a zero-point drop and **passes** — a green build

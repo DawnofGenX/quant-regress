@@ -21,7 +21,13 @@ from pathlib import Path
 
 from .adapter import AdapterError, build_model_factory
 from .evalset import EvalSet, EvalSetError, normalise
-from .harness import SUPPORTED_PRECISIONS, QuantHarness, Verdict
+from .harness import (
+    SUPPORTED_PRECISIONS,
+    QuantHarness,
+    Verdict,
+    _check_min_accuracy,
+    _check_threshold,
+)
 
 EXIT_OK, EXIT_REGRESSION, EXIT_USAGE = 0, 1, 2
 
@@ -37,6 +43,29 @@ SCORERS = {
     "exact": lambda pred, expected: normalise(pred) == expected,
     "contains": lambda pred, expected: expected in normalise(pred),
 }
+
+
+class _VersionAction(argparse.Action):
+    """Print the version and exit, without requiring --eval.
+
+    `store_true` cannot do this: argparse validates required arguments
+    (``--eval``) before ``main`` ever sees them, so a plain
+    ``--version`` would die with "the following arguments are required".
+    A custom action runs during parsing, which is exactly when argparse's
+    own ``--version`` behaves.
+    """
+
+    def __init__(self, option_strings, dest, **kwargs):
+        kwargs.setdefault("nargs", 0)
+        kwargs.setdefault("default", argparse.SUPPRESS)
+        kwargs.setdefault("help", "print the installed version and exit")
+        super().__init__(option_strings, dest, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from . import __version__
+
+        parser._print_message(f"quant-regress {__version__}\n", sys.stdout)
+        parser.exit()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,6 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--progress-every", type=int, default=25,
                    help="print a progress line every N cases to stderr "
                         "(0 disables). Stdout is never polluted.")
+    p.add_argument("--version", action=_VersionAction)
+    p.add_argument("--dry-run", action="store_true",
+                   help="validate the configuration (eval set, precisions, "
+                        "thresholds) and exit WITHOUT loading a model. "
+                        "Catches a typo'd precision before a multi-GB "
+                        "download. Exit 0 = config is usable, 2 = it is not.")
     return p
 
 
@@ -161,21 +196,93 @@ def _progress_printer(every: int):
     return report
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def _validate_config(args) -> tuple[str | None, list[str] | None]:
+    """Check everything checkable without a model, and report why it failed.
 
-    # Validate precisions BEFORE any model is built. A typo like "int4"
-    # otherwise costs a full download to discover, and the error surfaces
-    # after minutes of work instead of instantly.
+    Returns ``(error_message, precisions)``. When ``error_message`` is not
+    None the configuration is unusable and ``precisions`` is None.
+
+    Every check here runs identically in a dry run and before a real run,
+    so a config that passes ``--dry-run`` is a config the real run will
+    never reject at this stage -- the whole point of a dry run is that its
+    answer means something.
+    """
     precisions = [p.strip() for p in args.precisions.split(",") if p.strip()]
     for p in (args.baseline_precision, *precisions):
         if p not in SUPPORTED_PRECISIONS:
-            print(
-                f"error: unsupported precision {p!r}; supported: "
+            return (
+                f"unsupported precision {p!r}; supported: "
                 f"{list(SUPPORTED_PRECISIONS)}",
-                file=sys.stderr,
+                None,
             )
+    if not precisions:
+        return (
+            "no candidate precisions given: nothing would be compared "
+            "against the baseline, so the run would report PASS without "
+            "measuring a quantized model. Pass e.g. --precisions int8.",
+            None,
+        )
+    if args.baseline_precision in precisions:
+        return (
+            f"baseline precision {args.baseline_precision!r} must not appear "
+            f"in candidate precisions {precisions}: the harness would "
+            f"compare a model against itself, producing a 0.0-point drop "
+            f"and PASS without measuring any quantization regression.",
+            None,
+        )
+    try:
+        _check_threshold(args.max_drop_points)
+    except ValueError as exc:
+        return str(exc), None
+    try:
+        _check_min_accuracy(args.min_accuracy)
+    except ValueError as exc:
+        return str(exc), None
+    if args.scorer not in SCORERS:
+        return (
+            f"unknown scorer {args.scorer!r}; supported: {sorted(SCORERS)}",
+            None,
+        )
+    if args.output_format not in OUTPUT_FORMATS:
+        return (
+            f"unknown output format {args.output_format!r}; supported: "
+            f"{list(OUTPUT_FORMATS)}",
+            None,
+        )
+    return None, precisions
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    # Validate everything that needs no model BEFORE any model is built. A
+    # typo like "int4" otherwise costs a full download to discover, and the
+    # error surfaces after minutes of work instead of instantly.
+    error, precisions = _validate_config(args)
+    if error is not None:
+        print(f"error: {error}", file=sys.stderr)
+        return EXIT_USAGE
+    assert precisions is not None  # an error message is None only when precisions is set
+
+    if args.dry_run:
+        # A dry run must not touch the network: the whole point is that a
+        # broken config is discovered in milliseconds instead of after a
+        # multi-GB download. The checks above are done; the eval set is the
+        # last thing that can be validated offline.
+        try:
+            eval_set = EvalSet.load(args.eval)
+        except EvalSetError as exc:
+            print(f"error: {exc}", file=sys.stderr)
             return EXIT_USAGE
+        print(
+            f"dry run: configuration is valid "
+            f"({len(eval_set)} cases in {args.eval}; "
+            f"baseline {args.baseline_precision} vs "
+            f"{', '.join(precisions)}; drop threshold "
+            f"{args.max_drop_points} pts).",
+            file=sys.stderr,
+        )
+        return EXIT_OK
 
     try:
         eval_set = EvalSet.load(args.eval)
@@ -217,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         res = harness.compare(
             eval_set,
             baseline_precision=args.baseline_precision,
-            candidate_precisions=[p.strip() for p in args.precisions.split(",") if p.strip()],
+            candidate_precisions=precisions,
             max_drop_points=args.max_drop_points,
             min_accuracy=args.min_accuracy,
         )

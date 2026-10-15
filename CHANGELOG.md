@@ -4,6 +4,72 @@ All notable changes to quant-regress. This project is pre-1.0 stable in API but 
 `v1` GitHub Action tag is what users are told to pin, so **action-visible changes are
 called out here as breaking**.
 
+## 1.1.0
+
+### Added — the prompt is rendered the way the model expects to read it
+
+- **Chat models are prompted through their own chat template.** Llama-3,
+  Mistral-Instruct and every other instruction-tuned checkpoint carry a
+  template in the tokenizer, and that is how `--system-prompt` reaches them.
+  Before this, the system prompt and the user turn were pasted as
+  `f"{system_prompt}\n{prompt}"`, which is input the model was never trained
+  on: it answers with conversational filler instead of the expected token,
+  so the accuracy being measured is the accuracy of a *broken prompt* —
+  and the marginal-decision damage this tool exists to detect is invisible.
+  `--system-prompt` now goes through `apply_chat_template` when the
+  tokenizer actually carries a template.
+- **`--version`** prints the installed version. Handy for pinning a ref in a
+  workflow or filing a bug; previously the only way to read it was to import
+  the package.
+- **`--dry-run`** validates the configuration and exits **without loading a
+  model**. A typo'd precision, a self-comparison
+  (`--baseline-precision int8 --precisions int8`), a NaN drop threshold, a
+  percentage where a fraction belongs, or a missing eval set is now caught in
+  milliseconds instead of after a multi-GB download. Exit 0 = usable, 2 = not.
+  Every check a dry run performs is the same check the real run performs
+  first, so a config that passes a dry run is never rejected later.
+
+### Fixed — a base model's tokenizer is not a chat model
+
+- `apply_chat_template` is defined on **every** transformers tokenizer,
+  including base models like BERT and GPT-2 that have no template at all —
+  calling it there raises
+  `ValueError: Cannot use chat template functions because tokenizer.chat_template
+  is not set`. The template is only used when the tokenizer *carries* one
+  (`chat_template` is a set string), so non-chat architectures keep the
+  original concatenation path and are not turned into exit 2. This was caught
+  by the new real-model integration test, not by the fakes — a fake only has
+  an attribute if the test gives it one.
+
+### Tests — 109 → 135, and every new test proven load-bearing
+
+- **A real checkpoint runs through the whole pipeline.** No test before this
+  proved that `EvalSet.load` → `build_model_factory` → `QuantHarness.compare`
+  → `to_dict` compose on real weights, which is exactly where the silent-PASS
+  defects lived. Uses `hf-internal-testing/tiny-random-bert`; the accuracy of
+  a randomly-initialised checkpoint is meaningless, so the tests assert the
+  pipeline's *contract* (whole set scored per precision, the accounting
+  invariant `correct + misclassified == total`, and that the int8 arm really
+  was quantized) rather than a score that would make CI a coin flip.
+- **Every CLI flag is proven to reach its destination.**
+  `--max-new-tokens`, `--cache-dir`, `--hf-token`, `$HF_TOKEN` fallback, and a
+  non-default `--baseline-precision` were all parsed and then silently dropped
+  by `main()`: the flag is accepted, the run succeeds, and the value never
+  influences the measurement. Each now has a forwarding test, each verified
+  load-bearing by deleting the forwarding and watching that test go red.
+- **The `labels=` path in `_predict` is covered.** A logits-only model with no
+  `id2label` is a real model shape and its label-mapping branch had no test at
+  all — the id2label branch was covered, this one was not.
+- **`misclassified` contents are asserted**, including that the JSON report
+  carries them, so a red build names the cases that got worse.
+- **`adapter.SUPPORTED` and `harness.SUPPORTED_PRECISIONS` cannot drift** —
+  two literals describing the same set, with the CLI validating against one
+  and the adapter against the other.
+- **The exit-code contract (0/1/2) is asserted directly**, as are
+  `normalise()` on non-string input, a row of JSON scalars loading instead of
+  crashing, and `_count_quantized` reading 0 on an fp32 model (the number the
+  quantize guard's whole threshold rests on).
+
 ## 1.0.3 — pinned at `v1`
 
 ### Fixed — the measurement path could OOM, crash, or certify a fake quantization

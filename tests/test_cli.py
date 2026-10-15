@@ -614,3 +614,232 @@ def test_text_output_reflects_the_run_in_stdout(tmp_path, monkeypatch, capsys):
     assert "| fp32 (baseline) | 100.0% | 6/6 | — |" in out
     assert "| int8 | 0.0% | 0/6 | +100.0 pts |" in out
     assert "worst drop: +100.00 pts" in out
+
+
+def test_version_flag_prints_the_package_version(capsys):
+    """`--version` is a standard expectation and was missing.
+
+    A user cannot report a bug or pin an Action ref without it, and the
+    version exists in the package already -- there was no way to read it.
+    """
+    import quant_regress
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert quant_regress.__version__ in out, (
+        f"--version should print {quant_regress.__version__}, got {out!r}"
+    )
+
+
+def test_dry_run_validates_config_without_building_a_model(
+    tmp_path, monkeypatch, capsys
+):
+    """`--dry-run` must check the config, not download a model.
+
+    Discovering a typo'd precision or a broken eval set AFTER a multi-GB
+    download is the worst way to learn about it: the error surfaces
+    minutes late and the download happened for nothing. A dry run that
+    touches the network is not a dry run.
+    """
+    def explode(*a, **kw):
+        raise AssertionError(
+            "--dry-run must not build a model factory (that downloads weights)"
+        )
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", explode)
+    rc = main([
+        "--eval", _eval(tmp_path),
+        "--model", "meta-llama/Llama-3.2-1B-Instruct",
+        "--dry-run",
+    ])
+    assert rc == 0, "a valid configuration must exit 0 in a dry run"
+    err = capsys.readouterr().err
+    assert "eval" in err.lower() or "config" in err.lower(), (
+        f"a dry run should say what it validated, got {err!r}"
+    )
+
+
+def test_dry_run_reports_a_bad_precision_without_downloading(
+    tmp_path, monkeypatch, capsys
+):
+    """A typo'd precision must be caught by the dry run, not after the download."""
+    def explode(*a, **kw):
+        raise AssertionError("--dry-run must not build a model factory")
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", explode)
+    rc = main([
+        "--eval", _eval(tmp_path),
+        "--model", "fake-model",
+        "--precisions", "int4",
+        "--dry-run",
+    ])
+    assert rc == 2, "an unsupported precision is a usage error, not a pass"
+    assert "int4" in capsys.readouterr().err
+
+
+def test_dry_run_reports_an_unreadable_eval_set_without_downloading(
+    tmp_path, monkeypatch, capsys
+):
+    """A missing eval set must fail the dry run before any model is built."""
+    def explode(*a, **kw):
+        raise AssertionError("--dry-run must not build a model factory")
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", explode)
+    rc = main([
+        "--eval", str(tmp_path / "nope.jsonl"),
+        "--model", "fake-model",
+        "--dry-run",
+    ])
+    assert rc == 2
+    assert "eval" in capsys.readouterr().err.lower()
+
+
+def test_dry_run_reports_a_baseline_equal_to_a_candidate(
+    tmp_path, monkeypatch, capsys
+):
+    """Comparing a precision against itself must be refused up front.
+
+    This is the silent-PASS class: baseline int8 vs candidate int8 compares
+    a model against itself and reports 0.0 drop. It is caught inside
+    compare(), which needs a real run -- so the dry run must check it itself.
+    """
+    def explode(*a, **kw):
+        raise AssertionError("--dry-run must not build a model factory")
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", explode)
+    r = main([
+        "--eval", _eval(tmp_path),
+        "--model", "fake-model",
+        "--baseline-precision", "int8",
+        "--precisions", "int8",
+        "--dry-run",
+    ])
+    assert r == 2
+    assert "baseline" in capsys.readouterr().err.lower()
+
+
+# --------------------------------------------------------------------------
+# Every remaining CLI flag must be proven to REACH its destination. Each of
+# these was defined on the parser and then silently dropped by main(), which
+# is invisible: the flag is accepted, the run succeeds, and the value the
+# caller passed never influences the measurement.
+# --------------------------------------------------------------------------
+
+
+def test_max_new_tokens_is_forwarded_to_the_model_factory(tmp_path, monkeypatch):
+    """--max-new-tokens must reach build_model_factory, not stop at the parser."""
+    seen = {}
+
+    def factory(model_name, **kw):
+        seen.update(kw)
+        return lambda precision: _Fake(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    main(["--eval", _eval(tmp_path), "--model", "m", "--max-new-tokens", "7"])
+    assert seen.get("max_new_tokens") == 7, (
+        f"--max-new-tokens 7 never reached the factory; got {seen.get('max_new_tokens')!r}"
+    )
+
+
+def test_cache_dir_is_forwarded_to_the_model_factory(tmp_path, monkeypatch):
+    """--cache-dir must reach from_pretrained, or the cache goes to the default."""
+    seen = {}
+
+    def factory(model_name, **kw):
+        seen.update(kw)
+        return lambda precision: _Fake(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    cache = str(tmp_path / "hf-cache")
+    main(["--eval", _eval(tmp_path), "--model", "m", "--cache-dir", cache])
+    assert seen.get("cache_dir") == cache, (
+        f"--cache-dir {cache!r} never reached the factory; got {seen.get('cache_dir')!r}"
+    )
+
+
+def test_baseline_precision_is_forwarded_to_the_comparison(tmp_path, monkeypatch):
+    """A non-default --baseline-precision must be measured, not ignored.
+
+    If it were dropped, a caller asking for an int8 baseline against an
+    fp32 candidate would silently get an fp32 baseline -- the comparison
+    would be reporting a measurement the caller never asked for, and the
+    verdict would still look authoritative.
+    """
+    import quant_regress.harness as harness_mod
+
+    class _Fake:
+        def __init__(self, precision):
+            self.precision = precision
+
+        def eval(self):
+            return self
+
+        def answer(self, prompt):
+            return "yes"
+
+    # capture() stops the run before any model is really built.
+    monkeypatch.setattr(
+        "quant_regress.cli.build_model_factory",
+        lambda *a, **kw: (lambda p: _Fake(p)),
+    )
+    precisions_seen = []
+
+    def spy(self, eval_set, baseline_precision="fp32",
+            candidate_precisions=("int8",), **kw):
+        precisions_seen.append((baseline_precision, list(candidate_precisions)))
+        raise SystemExit(0)
+
+    monkeypatch.setattr(harness_mod.QuantHarness, "compare", spy)
+    with pytest.raises(SystemExit):
+        main(["--eval", _eval(tmp_path), "--model", "m",
+              "--baseline-precision", "int8", "--precisions", "fp32"])
+
+    assert precisions_seen, "compare() was never reached"
+    baseline, candidates = precisions_seen[0]
+    assert baseline == "int8", (
+        f"--baseline-precision int8 never reached compare(); "
+        f"it got baseline={baseline!r}"
+    )
+    assert candidates == ["fp32"], (
+        f"--precisions fp32 did not reach compare(); got {candidates!r}"
+    )
+
+
+def test_hf_token_falls_back_to_the_environment(tmp_path, monkeypatch):
+    """$HF_TOKEN must be used when --hf-token is absent.
+
+    Gated models (Llama-3, Mistral) need a token; a caller configuring
+    HF_TOKEN as a repository secret and never seeing it applied would
+    get a 401 that reads like a bad model id.
+    """
+    seen = {}
+
+    def factory(model_name, **kw):
+        seen.update(kw)
+        return lambda precision: _Fake(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    monkeypatch.setenv("HF_TOKEN", "hf_ENVIRONMENT_TOKEN")
+    main(["--eval", _eval(tmp_path), "--model", "m"])
+    assert seen.get("hf_token") == "hf_ENVIRONMENT_TOKEN", (
+        f"$HF_TOKEN was not forwarded; got {seen.get('hf_token')!r}"
+    )
+
+
+def test_explicit_hf_token_wins_over_the_environment(tmp_path, monkeypatch):
+    """--hf-token must override $HF_TOKEN, not the other way round."""
+    seen = {}
+
+    def factory(model_name, **kw):
+        seen.update(kw)
+        return lambda precision: _Fake(precision)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    monkeypatch.setenv("HF_TOKEN", "hf_ENVIRONMENT_TOKEN")
+    main(["--eval", _eval(tmp_path), "--model", "m",
+          "--hf-token", "hf_EXPLICIT_TOKEN"])
+    assert seen.get("hf_token") == "hf_EXPLICIT_TOKEN", (
+        f"--hf-token should win over the environment, got {seen.get('hf_token')!r}"
+    )

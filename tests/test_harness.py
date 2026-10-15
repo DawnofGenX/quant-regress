@@ -666,6 +666,201 @@ def test_generate_path_is_reachable_end_to_end_and_can_score(tmp_path):
     )
     assert res.verdict is Verdict.PASS
 
+
+# --------------------------------------------------------------------------
+# Chat models need the model's OWN prompt format, not a raw string paste.
+#
+# An instruction-tuned checkpoint carries a chat template that wraps the
+# system prompt and the user turn in its special tokens
+# (<|begin_of_text|><|start_header_id|>...). Prepending the system prompt as
+# plain text -- "You are precise.\\nThe capital of France is" -- produces
+# input the chat model was not trained on, so it answers in conversation
+# filler rather than the expected token, and the marginal-decision damage
+# this tool exists to detect is measured on a broken prompt instead.
+# --------------------------------------------------------------------------
+
+
+def test_chat_template_is_used_when_the_tokenizer_has_one():
+    """The system prompt and user turn must go through apply_chat_template.
+
+    A tokenizer with `apply_chat_template` is how HF exposes a chat model's
+    own format. Ignoring it and pasting f"{system}\\n{prompt}" is the bug.
+    """
+    class _ChatTok:
+        def __init__(self):
+            self.formatted = None
+            # A real chat tokenizer carries the template STRING, not just
+            # the method -- transformers defines the method on every
+            # tokenizer and raises when chat_template is None.
+            self.chat_template = "{% for m in messages %}..."
+
+        def apply_chat_template(self, conversation, tokenize=False,
+                                add_generation_prompt=True):
+            self.formatted = conversation
+            return "<|system|>" + "".join(m["content"] for m in conversation) \
+                   + "<|assistant|>"
+
+        def __call__(self, text, return_tensors=None):
+            return {"input_ids": _FakeBatch([0, 0])}
+
+        def decode(self, ids, skip_special_tokens=False):
+            return " ".join(_VOCAB.get(int(i), str(i)) for i in ids)
+
+    _VOCAB = {99: "Paris"}
+
+    class _ChatModel:
+        def __init__(self, precision="fp32"):
+            self.precision = precision
+            self.tokenizer = _ChatTok()
+
+        def eval(self):
+            return self
+
+        def generate(self, **kwargs):
+            # 2 prompt tokens (as _ChatTok emits) + 1 continuation token.
+            n_prompt = len(kwargs["input_ids"])
+            return _FakeSeq([0] * n_prompt + [99])
+
+    model = _ChatModel()
+    h = QuantHarness(model_factory=lambda p: model,
+                     system_prompt="You are a precise assistant.")
+    tok = model.tokenizer
+    out = h._predict(model, tok, "The capital of France is")
+    assert out == "Paris"
+    # The template must have been applied, with the system role and the user
+    # turn as separate messages -- not one pasted string.
+    assert tok.formatted is not None, (
+        "apply_chat_template was never called: the system prompt and user "
+        "turn were pasted as raw text instead of the model's own format"
+    )
+    assert tok.formatted == [
+        {"role": "system", "content": "You are a precise assistant."},
+        {"role": "user", "content": "The capital of France is"},
+    ], f"chat template got {tok.formatted!r}"
+
+
+def test_no_system_prompt_still_uses_the_chat_template():
+    """A chat model with no --system-prompt must still get the user turn templated.
+
+    Llama-3 without its template treats bare text as a pretraining
+    continuation, so even a lone user turn has to be wrapped.
+    """
+    class _ChatTok:
+        def __init__(self):
+            self.formatted = None
+            # See the other chat test: the template STRING is the signal,
+            # not the method's existence.
+            self.chat_template = "{% for m in messages %}..."
+
+        def apply_chat_template(self, conversation, tokenize=False,
+                                add_generation_prompt=True):
+            self.formatted = conversation
+            return "<|user|>" + "".join(m["content"] for m in conversation) \
+                   + "<|assistant|>"
+
+        def __call__(self, text, return_tensors=None):
+            return {"input_ids": _FakeBatch([0, 0])}
+
+        def decode(self, ids, skip_special_tokens=False):
+            return " ".join({99: "Paris"}.get(int(i), str(i)) for i in ids)
+
+    class _ChatModel:
+        def __init__(self, precision="fp32"):
+            self.precision = precision
+            self.tokenizer = _ChatTok()
+
+        def eval(self):
+            return self
+
+        def generate(self, **kwargs):
+            # 2 prompt tokens (as _ChatTok emits) + 1 continuation token.
+            n_prompt = len(kwargs["input_ids"])
+            return _FakeSeq([0] * n_prompt + [99])
+
+    model = _ChatModel()
+    h = QuantHarness(model_factory=lambda p: model)
+    out = h._predict(model, model.tokenizer, "The capital of France is")
+    assert out == "Paris"
+    assert model.tokenizer.formatted == [
+        {"role": "user", "content": "The capital of France is"},
+    ], (
+        "a chat model with no system prompt still needs its user turn "
+        f"templated, got {model.tokenizer.formatted!r}"
+    )
+
+
+def test_tokenizer_without_a_chat_template_falls_back_to_concatenation():
+    """A non-chat tokenizer must keep working exactly as before.
+
+    The fallback (system prompt + newline + prompt) is the pre-existing
+    behaviour, and a base model's tokenizer has no apply_chat_template, so
+    the flag must not break the common case.
+    """
+    h, model, tok = _gen_harness(system_prompt="You are a precise assistant.")
+    out = h._predict(model, tok, "The capital of France is")
+    assert out == "Paris"
+    assert tok.calls[-1] == "You are a precise assistant.\nThe capital of France is", (
+        f"non-chat tokenizer should keep the concatenation fallback, got "
+        f"{tok.calls[-1]!r}"
+    )
+
+
+def test_tokenizer_with_the_method_but_no_template_falls_back():
+    """A base model's tokenizer HAS apply_chat_template but no chat_template.
+
+    This is the real shape of every non-chat transformers tokenizer (BERT,
+    GPT-2, DeBERTa): the method exists and raises
+    ``ValueError: Cannot use chat template functions because
+    tokenizer.chat_template is not set``. Treating a callable method as the
+    signal turned every such model into exit 2, and the fakes above could
+    not catch it because a fake only has an attribute if the test gives it
+    one -- the real-model integration test did.
+    """
+    from quant_regress.harness import _has_chat_template
+
+    class _BaseTok:
+        """Mirrors a real transformers base tokenizer."""
+
+        chat_template = None
+
+        def apply_chat_template(self, conversation, tokenize=False,
+                                add_generation_prompt=True):
+            raise ValueError(
+                "Cannot use chat template functions because "
+                "tokenizer.chat_template is not set and no template "
+                "argument was passed!"
+            )
+
+        def __call__(self, text, return_tensors=None):
+            return {"input_ids": _FakeBatch([0, 0])}
+
+        def decode(self, ids, skip_special_tokens=False):
+            return " ".join({99: "Paris"}.get(int(i), str(i)) for i in ids)
+
+    tok = _BaseTok()
+    assert not _has_chat_template(tok), (
+        "a tokenizer with chat_template=None must NOT be treated as a chat "
+        "model: calling its template method raises ValueError"
+    )
+
+    class _Model:
+        def __init__(self, precision="fp32"):
+            self.precision = precision
+
+        def eval(self):
+            return self
+
+        def generate(self, **kwargs):
+            n_prompt = len(kwargs["input_ids"])
+            return _FakeSeq([0] * n_prompt + [99])
+
+    h = QuantHarness(model_factory=lambda p: _Model(p),
+                     system_prompt="You are a precise assistant.")
+    out = h._predict(_Model(), tok, "The capital of France is")
+    assert out == "Paris", (
+        f"a base tokenizer must fall back to concatenation, got {out!r}"
+    )
+
 # --------------------------------------------------------------------------
 # Phase 4 -- coverage for paths that were previously reachable but unguarded.
 # Each of these could regress silently: the guard exists, nothing proved it
@@ -786,3 +981,154 @@ def test_default_scorer_matches_after_normalisation(tmp_path):
     h = QuantHarness(model_factory=lambda p: _Chatty(p))
     res = h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"])
     assert res.baseline.accuracy == 1.0, "exact scoring should normalise before comparing"
+
+
+# --------------------------------------------------------------------------
+# Phase 4, continued. Each of these covers a path that was reachable but
+# unproven, or pins a constant a typo in would otherwise only surface as a
+# confusing failure somewhere else.
+# --------------------------------------------------------------------------
+
+
+def test_labels_path_maps_argmax_to_the_callers_label_set():
+    """`labels=` must win when the model has no id2label.
+
+    A logits-only classifier without id2label is a real model shape (a
+    sentence-pair verifier, for instance). The branch that maps the argmax
+    onto the caller's label list was never exercised: the existing test only
+    proved the *other* branch, the one that uses the model's own id2label.
+    A wrong index here, or a silent fallback to str(idx), would make every
+    such model score 0% at every precision -- a 0.00-point drop and a PASS
+    for a model the tool never actually read.
+    """
+    class _LogitsModel:
+        def __init__(self, precision="fp32"):
+            self.precision = precision
+            self.config = _NoId2Label()
+            self.tokenizer = _FakeTokenizer()
+
+        def eval(self):
+            return self
+
+        def __call__(self, **kwargs):
+            # argmax is index 1, which labels[1] names "yes".
+            return _Logits(0.2)
+
+    class _NoId2Label:
+        pass
+
+    h = QuantHarness(model_factory=lambda p: _LogitsModel(p), labels=["no", "yes"])
+    model = _LogitsModel()
+    out = h._predict(model, model.tokenizer, "Is this claim true?")
+    assert out == "yes", (
+        f"expected the argmax mapped through labels=[no, yes] to 'yes', got {out!r}"
+    )
+
+
+def test_labels_falls_back_to_the_index_when_argmax_is_out_of_range():
+    """An out-of-range argmax must degrade to str(idx), not raise.
+
+    A label list shorter than the model's class count is a configuration
+    mistake, and the tool must not crash with an IndexError -- that would
+    become a RegressError and exit 2 for a run that was otherwise measured.
+    """
+    class _LogitsModel:
+        def __init__(self, precision="fp32"):
+            self.precision = precision
+            self.config = _NoId2Label()
+            self.tokenizer = _FakeTokenizer()
+
+        def eval(self):
+            return self
+
+        def __call__(self, **kwargs):
+            # scores[0] is lower, so argmax is index 1 -- one past labels.
+            return _Logits(0.2)
+
+    class _NoId2Label:
+        pass
+
+    # One label for a two-class model: argmax (index 1) is out of range.
+    h = QuantHarness(model_factory=lambda p: _LogitsModel(p), labels=["no"])
+    model = _LogitsModel()
+    out = h._predict(model, model.tokenizer, "Is this claim true?")
+    assert out == "1", (
+        f"an out-of-range argmax should stringify the index, got {out!r}"
+    )
+
+
+def test_misclassified_lists_the_cases_that_failed_per_arm(tmp_path):
+    """The report must name WHICH cases got worse, not just how many.
+
+    `misclassified` is the triage data: without it a red build says only
+    "something regressed" and the only way to find out what is to re-run
+    locally. Populating it was never asserted, so an ordering or off-by-one
+    regression could strip it silently.
+    """
+    class _PartiallyRight:
+        """Correct on odd-numbered calls only."""
+
+        def __init__(self, precision="fp32"):
+            self.precision = precision
+            self.calls = 0
+
+        def eval(self):
+            return self
+
+        def answer(self, prompt: str) -> str:
+            self.calls += 1
+            return "yes" if self.calls % 2 == 1 else "no"
+
+    rows = [{"id": f"c{i}", "prompt": "p?", "expected": "yes"} for i in range(1, 5)]
+    path = tmp_path / "eval.jsonl"
+    path.write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+    )
+
+    es = EvalSet.load(path)
+    h = QuantHarness(model_factory=lambda p: _PartiallyRight(p))
+    res = h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"])
+    assert res.baseline.misclassified == ["c2", "c4"], (
+        f"expected the even cases named as failed, got "
+        f"{res.baseline.misclassified!r}"
+    )
+    # A fresh model per precision, so the candidate restarts its own count.
+    assert res.candidates[0].misclassified == ["c2", "c4"]
+    # The report carries them so a red build is triageable.
+    d = res.to_dict()
+    assert d["baseline"]["misclassified"] == ["c2", "c4"]
+    assert d["candidates"][0]["misclassified"] == ["c2", "c4"]
+
+
+def test_supported_precision_tuples_cannot_drift_apart():
+    """adapter.SUPPORTED and harness.SUPPORTED_PRECISIONS must be one truth.
+
+    They are two literals describing the same set, and the CLI validates
+    against the harness copy while the adapter validates against its own.
+    A typo in either would be caught only as a confusing "unsupported
+    precision" error somewhere downstream, so pin them to the same value
+    here instead.
+    """
+    from quant_regress.adapter import SUPPORTED
+    from quant_regress.harness import SUPPORTED_PRECISIONS
+
+    assert SUPPORTED == ("fp32", "int8"), f"adapter.SUPPORTED drifted: {SUPPORTED}"
+    assert SUPPORTED == SUPPORTED_PRECISIONS, (
+        f"adapter.SUPPORTED {SUPPORTED} and harness.SUPPORTED_PRECISIONS "
+        f"{SUPPORTED_PRECISIONS} describe the same set but have drifted apart"
+    )
+
+
+def test_exit_code_constants_pin_the_ci_contract():
+    """The exit codes are a contract with CI; a swap would be silent.
+
+    0/1/2 is what a workflow branches on. Swapping EXIT_REGRESSION and
+    EXIT_USAGE would make every misconfigured run look like a regression
+    and every regression look like a config error -- and nothing else in
+    the suite asserts the mapping directly.
+    """
+    from quant_regress.cli import EXIT_OK, EXIT_REGRESSION, EXIT_USAGE
+
+    assert EXIT_OK == 0
+    assert EXIT_REGRESSION == 1
+    assert EXIT_USAGE == 2

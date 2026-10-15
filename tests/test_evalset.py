@@ -123,3 +123,33 @@ def test_rejects_a_non_regular_file(tmp_path):
         "read_text(), which waits forever for a writer"
     )
     assert str(box.get("result", "")).startswith("EvalSetError"), box.get("result")
+
+
+def test_normalise_handles_non_string_values():
+    """`normalise` must stringify, not crash, on JSON's non-string scalars.
+
+    JSON allows numbers, booleans and null in the `expected` field, and
+    `str()` is what keeps them from reaching an AttributeError in the
+    scorer. None is the sharp edge: the literal string "None" would match
+    an `expected` of null, which is surprising but at least deterministic.
+    """
+    from quant_regress.evalset import normalise
+
+    assert normalise(123) == "123"
+    assert normalise(None) == "none"
+    assert normalise(True) == "true"
+    assert normalise("  YES  ") == "yes"
+
+
+def test_non_string_fields_load_instead_of_crashing(tmp_path):
+    """A row of JSON scalars must load rather than raise somewhere obscure.
+
+    The `str()` conversions in the loader are the only thing between a
+    numeric id and a traceback at comparison time, and nothing asserted
+    they worked.
+    """
+    rows = [{"id": 123, "prompt": True, "expected": None}]
+    es = EvalSet.load(_write(tmp_path, rows))
+    assert es.cases[0].id == "123"
+    assert es.cases[0].prompt == "True"
+    assert es.cases[0].expected == "none"

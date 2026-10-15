@@ -178,6 +178,27 @@ class ComparisonResult:
         }
 
 
+def _has_chat_template(tok) -> bool:
+    """True when the tokenizer actually carries a chat template.
+
+    ``apply_chat_template`` is defined on EVERY transformers tokenizer, so
+    its existence says nothing. What distinguishes a chat model is
+    ``chat_template`` being SET to a non-None string: calling the method
+    without one raises ``ValueError``, which in this tool would become
+    exit 2 for a model that loads fine (measured on
+    ``hf-internal-testing/tiny-random-bert``).
+
+    A test double without the attribute at all is a base tokenizer, which
+    is the correct reading for a fake.
+    """
+    if tok is None:
+        return False
+    template = getattr(tok, "chat_template", None)
+    if not isinstance(template, str) or not template.strip():
+        return False
+    return callable(getattr(tok, "apply_chat_template", None))
+
+
 class RegressError(RuntimeError):
     """A model could not be made to produce an answer.
 
@@ -417,6 +438,45 @@ class QuantHarness:
                 f"and its tokenizer load and match this eval set's format."
             ) from exc
 
+    def _prompt_text(self, tok, prompt: str) -> str:
+        """Render the prompt the way the model itself expects to read it.
+
+        An instruction-tuned checkpoint carries its own chat template, which
+        is how ``--system-prompt`` is supposed to reach it. Pasting
+        ``f"{system_prompt}\\n{prompt}"`` instead produces input the model was
+        never trained on: it answers with conversational filler rather than
+        the expected token, so the accuracy being measured is the accuracy
+        of a *broken prompt*, and the marginal-decision damage this tool
+        exists to detect is invisible.
+
+        ``apply_chat_template`` is HF's standard hook for this and it is what
+        a tokenizer exposes exactly when the model is a chat model, so using
+        it is not a heuristic -- it is asking the model how it wants to be
+        addressed.
+
+        The test for "is a chat model" is ``chat_template`` being SET, not
+        ``apply_chat_template`` being callable. Every transformers tokenizer
+        has the method -- including base models like BERT that have no
+        template at all -- and calling it there raises
+        ``ValueError: Cannot use chat template functions because
+        tokenizer.chat_template is not set``. That mistake turned every
+        non-chat model into exit 2, and the fake-based tests could not see
+        it because a fake only has the attribute if the test gives it one.
+        """
+        if _has_chat_template(tok):
+            conversation: list[dict[str, str]] = []
+            if self.system_prompt is not None:
+                conversation.append(
+                    {"role": "system", "content": self.system_prompt}
+                )
+            conversation.append({"role": "user", "content": prompt})
+            return tok.apply_chat_template(
+                conversation, tokenize=False, add_generation_prompt=True
+            )
+        if self.system_prompt is None:
+            return prompt
+        return f"{self.system_prompt}\n{prompt}"
+
     def _predict_one(self, model, tok, prompt: str) -> str:
         """The three supported model shapes, in priority order.
 
@@ -428,9 +488,10 @@ class QuantHarness:
         if callable(answer):
             return str(answer(prompt))
 
+        text = self._prompt_text(tok, prompt)
+
         # 1. real HF generation path — continuation only
         if tok is not None and hasattr(model, "generate"):
-            text = prompt if self.system_prompt is None else f"{self.system_prompt}\n{prompt}"
             inputs = tok(text, return_tensors="pt")
             inputs = {k: v.to(getattr(model, "device", "cpu")) for k, v in inputs.items()}
             out = model.generate(**inputs, max_new_tokens=self.max_new_tokens,
@@ -448,7 +509,6 @@ class QuantHarness:
                 "the prompt cannot be tokenized. Attach a tokenizer to the "
                 "model (model.tokenizer = ...) or use a model with .answer()."
             )
-        text = prompt if self.system_prompt is None else f"{self.system_prompt}\n{prompt}"
         inputs = tok(text, return_tensors="pt")
         inputs = {k: v.to(getattr(model, "device", "cpu")) for k, v in inputs.items()}
         logits = model(**inputs).logits
