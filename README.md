@@ -8,11 +8,19 @@ quantized model is fine. Task accuracy does not, provided you actually measure
 it. This action measures a task eval at each precision and fails the build when
 accuracy drops past a threshold you set.
 
-> **If you pinned `@v1` before 2026-10-07, re-sync.** That tag has moved to pick up
-> five correctness fixes, including one where the gate reported PASS for a model it had
-> never actually quantized. See [`CHANGELOG.md`](CHANGELOG.md).
-On a cross-encoder claim verifier, dynamic INT8 quantization left aggregate
-accuracy looking survivable while destroying the capability that mattered:
+> **If you pinned `@v1` before 2026-10-15, re-sync.** The tag has been re-pointed twice, most
+> recently on 2026-10-15, each time to pick up correctness fixes — including one where the gate
+> reported PASS for a model it had never actually quantized. For a gate you rely on, pin a SHA
+> rather than a moving tag. See [`CHANGELOG.md`](CHANGELOG.md).
+
+The failure this action exists to catch was measured on a real cross-encoder claim verifier in
+[`citesure`](https://github.com/DawnofGenX/citesure): dynamic INT8 left aggregate accuracy looking
+survivable while destroying the capability that mattered. The table below is this repo's
+**controlled reproduction** of that shape — a stub whose only behaviour is to separate at fp32 and
+collapse at int8, so the gate has something deterministic to catch in its own CI. It is **not** a
+run of a real model: this repo's adapter loads `AutoModelForCausalLM`, so it cannot load a
+cross-encoder at all (see [`CHANGELOG.md`](CHANGELOG.md)). Read the figures as a test of the gate's
+arithmetic, not as a model measurement.
 
 <!-- claim:int8-collapse -->
 | precision | accuracy | correct |
