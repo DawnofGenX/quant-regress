@@ -4,7 +4,8 @@
     "accuracy": 1.0,
     "correct": 20,
     "total": 20,
-    "seconds": 0.0
+    "seconds": 0.0,
+    "misclassified": []
   },
   "candidates": [
     {
@@ -13,7 +14,29 @@
       "correct": 0,
       "total": 20,
       "seconds": 0.0,
-      "drop_points": 100.0
+      "drop_points": 100.0,
+      "misclassified": [
+        "collapse-001",
+        "collapse-002",
+        "collapse-003",
+        "collapse-004",
+        "collapse-005",
+        "collapse-006",
+        "collapse-007",
+        "collapse-008",
+        "collapse-009",
+        "collapse-010",
+        "collapse-011",
+        "collapse-012",
+        "collapse-013",
+        "collapse-014",
+        "collapse-015",
+        "collapse-016",
+        "collapse-017",
+        "collapse-018",
+        "collapse-019",
+        "collapse-020"
+      ]
     }
   ],
   "worst_drop_points": 100.0,

@@ -24,4 +24,16 @@ jobs:
       - name: Unit tests
         run: python -m pytest -q
       - name: Claim reproducibility gate
-        run: python scripts/regen_int8_collapse.py
+        # The unit suite already runs tests/test_claims_are_reproducible.py, which executes
+        # these scripts and compares their output to the README. This step adds the part a
+        # test cannot do on a dirty tree: prove the *committed* results/ files are what the
+        # code produces. Before this, the step re-ran the script and overwrote the JSON
+        # without ever diffing, so a stale artifact passed forever.
+        run: |
+          python scripts/regen_int8_collapse.py
+          python scripts/regen_quiet_model.py
+          if ! git diff --quiet -- results/; then
+            echo "::error::results/ changed when regenerated — commit the regenerated files so the README's auditable artifact matches the code"
+            git diff --stat -- results/
+            exit 1
+          fi
