@@ -13,13 +13,47 @@ accuracy drops past a threshold you set.
 > reported PASS for a model it had never actually quantized. For a gate you rely on, pin a SHA
 > rather than a moving tag. See [`CHANGELOG.md`](CHANGELOG.md).
 
-The failure this action exists to catch was measured on a real cross-encoder claim verifier in
-[`citesure`](https://github.com/DawnofGenX/citesure): dynamic INT8 left aggregate accuracy looking
-survivable while destroying the capability that mattered. The table below is this repo's
-**controlled reproduction** of that shape — a stub whose only behaviour is to separate at fp32 and
-collapse at int8, so the gate has something deterministic to catch in its own CI. It is **not** a
-run of a real model: this repo's adapter loads `AutoModelForCausalLM`, so it cannot load a
-cross-encoder at all (see [`CHANGELOG.md`](CHANGELOG.md)). Read the figures as a test of the gate's
+## Measured on a real checkpoint
+
+The headline is a real measurement, not a stub. `scripts/regen_real_model.py`
+loads a real instruction-tuned causal LM — **Qwen/Qwen2.5-0.5B-Instruct** — and
+runs 20 single-answer arithmetic word problems through the same `QuantHarness`
+and adapter path the GitHub Action uses: an fp32 baseline and a dynamic-int8
+candidate, scored on the numeral the model produces. The fp32 baseline clears
+the `--min-accuracy` floor, so the int8 delta below is a real comparison, not a
+measurement from a model that cannot do the task.
+
+<!-- claim:real-model -->
+| precision | accuracy | correct | seconds |
+|---|---|---|---|
+| fp32 (baseline) | 80.0% <!-- claim:real-model --> | 16/20 | 81.4s |
+| int8 | 0.0% <!-- claim:real-model --> | 0/20 | 154.2s |
+
+worst drop: +80.0 pts -> FAIL <!-- claim:real-model -->
+
+baseline 80.0% is above the --min-accuracy floor (0.5) <!-- claim:real-model -->
+
+That is the failure this action exists to catch, on a real checkpoint: the
+quantized model still runs and still returns text, but the text is wrong. The
+int8 completions degrade into conversational filler ("To find the number that
+is 7", "I'm here to answer any question you") instead of the answer, so a
+token-level proxy that only looks at the distribution can clear it while the
+task eval — which asks for the numeral — cannot. Regenerate with
+`python scripts/regen_real_model.py --measure` (CPU, several minutes); the
+committed run is at [`results/real_model.json`](results/real_model.json), and
+`tests/test_claims_are_reproducible.py` fails the build if a number in this
+table stops matching the script's output.
+
+### The controlled reproduction (stub)
+
+The original motivation was a real cross-encoder claim verifier in
+[`citesure`](https://github.com/DawnofGenX/citesure), where dynamic INT8 left
+aggregate accuracy looking survivable while destroying the capability that
+mattered. This repo's adapter loads `AutoModelForCausalLM`, so it **cannot load
+a cross-encoder at all** — the table below is therefore this repo's **controlled
+reproduction** of that shape, not a run of that model: a stub whose only
+behaviour is to separate at fp32 and collapse at int8, so the gate has something
+deterministic to catch in its own CI. Read its figures as a test of the gate's
 arithmetic, not as a model measurement.
 
 <!-- claim:int8-collapse -->
@@ -28,15 +62,13 @@ arithmetic, not as a model measurement.
 | fp32 (baseline) | 100.0% <!-- claim:int8-collapse --> | 20/20 |
 | int8 | 0.0% <!-- claim:int8-collapse --> | 0/20 |
 
-Regenerate with `python scripts/regen_int8_collapse.py` — every figure above
-comes from that script, and `tests/test_claims_are_reproducible.py` fails the
-build if a number in this file stops matching it. The run's output is committed at
-[`results/int8_collapse.json`](results/int8_collapse.json), so the table above can be
-audited without running anything.
+Regenerate with `python scripts/regen_int8_collapse.py`; the run's output is
+committed at [`results/int8_collapse.json`](results/int8_collapse.json).
 
-The pattern that matters: the quantized model still runs, still returns a valid
-answer, and still looks like a working model. It is simply wrong every time.
-That is why a token-level proxy can clear it and a task eval cannot.
+The pattern that matters in both tables: the quantized model still runs, still
+returns a valid answer, and still looks like a working model. It is simply
+wrong every time. That is why a token-level proxy can clear it and a task eval
+cannot.
 
 ## Usage
 

@@ -1,0 +1,57 @@
+{
+  "baseline": {
+    "precision": "fp32",
+    "accuracy": 0.8,
+    "correct": 16,
+    "total": 20,
+    "seconds": 81.365,
+    "misclassified": [
+      "real-014",
+      "real-015",
+      "real-019",
+      "real-020"
+    ]
+  },
+  "candidates": [
+    {
+      "precision": "int8",
+      "accuracy": 0.0,
+      "correct": 0,
+      "total": 20,
+      "seconds": 154.249,
+      "drop_points": 80.0,
+      "misclassified": [
+        "real-001",
+        "real-002",
+        "real-003",
+        "real-004",
+        "real-005",
+        "real-006",
+        "real-007",
+        "real-008",
+        "real-009",
+        "real-010",
+        "real-011",
+        "real-012",
+        "real-013",
+        "real-014",
+        "real-015",
+        "real-016",
+        "real-017",
+        "real-018",
+        "real-019",
+        "real-020"
+      ]
+    }
+  ],
+  "worst_drop_points": 80.0,
+  "max_drop_points": 2.0,
+  "min_accuracy": 0.5,
+  "baseline_below_floor": false,
+  "floor_failure": null,
+  "verdict": "fail",
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "task": "20 single-answer arithmetic word problems, scored on the numeral produced",
+  "max_new_tokens": 8,
+  "wall_seconds": 368.9
+}

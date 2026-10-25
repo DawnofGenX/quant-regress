@@ -4,6 +4,29 @@ All notable changes to quant-regress. This project is pre-1.0 stable in API but 
 `v1` GitHub Action tag is what users are told to pin, so **action-visible changes are
 called out here as breaking**.
 
+## Unreleased
+
+### Added — the README leads with a real-checkpoint measurement
+
+- **`scripts/regen_real_model.py` + `results/real_model.json`** measure a real
+  instruction-tuned causal LM (`Qwen/Qwen2.5-0.5B-Instruct`) at fp32 and dynamic
+  int8 on 20 single-answer arithmetic word problems, through the same
+  `QuantHarness`/adapter path the Action uses. The committed run shows an 80.0%
+  fp32 baseline (above the `--min-accuracy` floor) collapsing to 0.0% at int8 —
+  a real, dramatic int8 collapse, verified against the raw completions (the
+  quantized model degrades into conversational filler instead of the answer).
+- **The README now leads with this real measurement** (`claim:real-model`), with
+  the previous stub table (`claim:int8-collapse`) kept below it as an explicitly
+  labelled controlled reproduction. The stub is a demonstration of the gate's
+  arithmetic, not a model measurement; the README says so, and keeps the note
+  that the `AutoModelForCausalLM` adapter cannot load a cross-encoder at all.
+- **`tests/test_claims_are_reproducible.py` now pins the real-model table** to the
+  committed artifact: the fast path of `regen_real_model.py` (no `--measure`)
+  prints the committed run, and the test fails if a README figure stops matching
+  it. `--measure` is the expensive reproduction a human runs to regenerate the
+  artifact; it is deliberately not what the test runs, so the suite stays fast
+  and deterministic.
+
 ## 1.1.0
 
 ### Added — the prompt is rendered the way the model expects to read it
