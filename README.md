@@ -8,10 +8,10 @@ quantized model is fine. Task accuracy does not, provided you actually measure
 it. This action measures a task eval at each precision and fails the build when
 accuracy drops past a threshold you set.
 
-> **If you pinned `@v1` before 2026-10-15, re-sync.** The tag has been re-pointed twice, most
-> recently on 2026-10-15, each time to pick up correctness fixes — including one where the gate
-> reported PASS for a model it had never actually quantized. For a gate you rely on, pin a SHA
-> rather than a moving tag. See [`CHANGELOG.md`](CHANGELOG.md).
+> **If you pinned `@v1` before 2026-10-15, re-sync.** The tag has been re-pointed at least four
+> times, most recently on 2026-10-15, each time to pick up correctness fixes — including one where
+> the gate reported PASS for a model it had never actually quantized. For a gate you rely on, pin a
+> SHA rather than a moving tag. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Measured on a real checkpoint
 
@@ -83,8 +83,8 @@ As a GitHub Action:
     min-accuracy: 0.5      # optional; see "Change is not quality" below
 ```
 
-`@v1` is a moving tag — it tracks the current release line, and has been re-pointed once
-(to pick up the fixes in `CHANGELOG.md`). Pin a commit SHA if you need immutability.
+`@v1` is a moving tag — it tracks the current release line, and has been re-pointed at least four
+times (to pick up the fixes in `CHANGELOG.md`). Pin a commit SHA if you need immutability.
 
 Or from the command line / your own CI:
 
