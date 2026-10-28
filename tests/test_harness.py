@@ -1112,7 +1112,7 @@ def test_supported_precision_tuples_cannot_drift_apart():
     from quant_regress.adapter import SUPPORTED
     from quant_regress.harness import SUPPORTED_PRECISIONS
 
-    assert SUPPORTED == ("fp32", "int8"), f"adapter.SUPPORTED drifted: {SUPPORTED}"
+    assert SUPPORTED == ("fp32", "fp16", "bf16", "int8"), f"adapter.SUPPORTED drifted: {SUPPORTED}"
     assert SUPPORTED == SUPPORTED_PRECISIONS, (
         f"adapter.SUPPORTED {SUPPORTED} and harness.SUPPORTED_PRECISIONS "
         f"{SUPPORTED_PRECISIONS} describe the same set but have drifted apart"
