@@ -9,7 +9,10 @@ scoring every case at every precision and refusing to report a partial run.
 from __future__ import annotations
 
 import gc
+import hashlib
+import json
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -17,7 +20,7 @@ from typing import Callable, Sequence
 
 from .evalset import EvalSet, normalise
 
-SUPPORTED_PRECISIONS = ("fp32", "int8")
+from .adapter import SUPPORTED as SUPPORTED_PRECISIONS
 
 
 def _check_threshold(max_drop_points: float) -> float:
@@ -210,6 +213,50 @@ class RegressError(RuntimeError):
     """
 
 
+class _ResponseCache:
+    """On-disk cache of model predictions, keyed by (model, precision, prompt).
+
+    A re-run of the same eval against the same model never re-generates:
+    the prediction is looked up instead. This is the main lever for the
+    per-PR cost called out in the backlog (E5): generation dominates wall
+    time, and most CI re-runs change nothing about the model or the eval.
+    """
+
+    def __init__(self, directory: str | None, model_name: str | None):
+        self._dir = directory
+        self._model = model_name or ""
+        self._data: dict[str, str] = {}
+        self._path: str | None = None
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+            self._path = os.path.join(directory, "responses.json")
+            if os.path.exists(self._path):
+                try:
+                    with open(self._path, encoding="utf-8") as f:
+                        self._data = json.load(f)
+                except (OSError, json.JSONDecodeError):
+                    self._data = {}
+
+    def _key(self, precision: str, prompt: str) -> str:
+        raw = f"{self._model}x00{precision}x00{prompt}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def get(self, precision: str, prompt: str) -> str | None:
+        if self._path is None:
+            return None
+        return self._data.get(self._key(precision, prompt))
+
+    def put(self, precision: str, prompt: str, prediction: str) -> None:
+        if self._path is None:
+            return
+        self._data[self._key(precision, prompt)] = prediction
+        try:
+            with open(self._path, "w", encoding="utf-8") as f:
+                json.dump(self._data, f)
+        except OSError:
+            pass
+
+
 class QuantHarness:
     """Measures task accuracy for a model at each requested precision.
 
@@ -225,6 +272,8 @@ class QuantHarness:
         system_prompt: str | None = None,
         labels: Sequence[str] | None = None,
         progress: Callable[[int, int, str], None] | None = None,
+        model_name: str | None = None,
+        response_cache_dir: str | None = None,
     ):
         if scorer is None:
             def scorer(pred: str, expected: str) -> bool:
@@ -238,6 +287,7 @@ class QuantHarness:
         # Called as progress(done, total, precision) after each case. The CLI
         # passes a stderr writer; a library caller can leave it unset.
         self._progress = progress
+        self._cache = _ResponseCache(response_cache_dir, model_name)
 
     # -- public -----------------------------------------------------------
     def compare(
@@ -347,16 +397,33 @@ class QuantHarness:
         producing a verdict — a failure that looks like a flake rather than a
         bug.
         """
-        model = self._factory(precision)
+        # Skip the (expensive) model load entirely when every case is already
+        # cached: a fully cached re-run then never touches the network or the
+        # weights, which is the biggest remaining cost lever.
+        cached_all = (
+            self._cache.get(precision, c.prompt) is not None
+            for c in eval_set
+        )
+        all_cached = all(cached_all)
+        if all_cached:
+            model = None
+        else:
+            model = self._factory(precision)
         tok = None
         try:
-            tok = getattr(model, "tokenizer", None)
+            if model is not None:
+                tok = getattr(model, "tokenizer", None)
             correct = 0
             mis: list[str] = []
             scored = 0
             t0 = time.perf_counter()
             for i, case in enumerate(eval_set, 1):
-                pred = self._predict(model, tok, case.prompt)
+                cached = self._cache.get(precision, case.prompt)
+                if cached is not None:
+                    pred = cached
+                else:
+                    pred = self._predict(model, tok, case.prompt)
+                    self._cache.put(precision, case.prompt, pred)
                 ok = self._scorer(pred, case.expected)
                 correct += int(ok)
                 scored += 1

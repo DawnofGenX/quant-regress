@@ -24,8 +24,6 @@ from torch.ao.quantization.quantization_mappings import (
 )
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-SUPPORTED = ("fp32", "int8")
-
 #: Module types that carry weights but are intentionally left in FP32 by dynamic
 #: quantization. Normalization layers are cheap and quantizing them is
 #: counter-productive, so their presence is NOT a sign of an unsupported model.
@@ -132,6 +130,31 @@ def _quantize_int8(model):
     return quantized
 
 
+# Precision backends. Single source of truth for what build_model_factory (and
+# therefore the CLI and the harness) accepts. Adding a backend here exposes it
+# end-to-end. Order is the order precisions are advertised in help text.
+def _identity(model):
+    return model
+
+
+def _to_fp16(model):
+    return model.half()
+
+
+def _to_bf16(model):
+    return model.bfloat16()
+
+
+BACKENDS: dict[str, callable] = {
+    "fp32": _identity,
+    "fp16": _to_fp16,
+    "bf16": _to_bf16,
+    "int8": _quantize_int8,
+}
+
+SUPPORTED = tuple(BACKENDS.keys())
+
+
 def build_model_factory(
     model_name: str,
     cache_dir: str | None = None,
@@ -165,18 +188,13 @@ def build_model_factory(
                 "Check the model id, and that the runner has disk space "
                 "(a 1B model is ~2 GB, a 7B model is ~14 GB)."
             ) from exc
-        if p == "int8":
-            # quantize_dynamic RETURNS a new model; the fp32 original stays
-            # referenced by this local `model` name until it is overwritten.
-            # Overwriting it alone is not enough for a real torch module
-            # graph, whose parent/child reference cycles keep the weights
-            # alive until the collector runs — so the original is dropped and
-            # a collection is forced here, while the peak is still in scope.
-            quantized = _quantize_int8(model)
-            del model
-            gc.collect()
-            model = quantized
-        # quantize_dynamic emits CPU-only kernels.
+        if p != "fp32":
+            transformed = BACKENDS[p](model)
+            if transformed is not model:
+                del model
+                gc.collect()
+            model = transformed
+        # Cast to CPU for all backends (quantized kernels are CPU-only).
         model = model.to("cpu").eval()
         model.tokenizer = tok  # attached for the harness
         model.max_new_tokens = max_new_tokens

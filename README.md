@@ -179,9 +179,31 @@ not `2`: the tool measured correctly and the answer is no. See
   semantic equivalence.
 - Models are downloaded at run time. A 1B model is ~2 GB; check runner disk.
 
+### Cost and caching
+
+A run downloads the model once (HF cache) and then generates on every case at
+every precision, on CPU, one case at a time. A 20-case, two-precision eval on a
+1B model is minutes per invocation, and every PR re-pays it. Two levers:
+
+- `--response-cache DIR` caches each prediction keyed by `(model, precision,
+  prompt)`. A re-run of an unchanged eval against an unchanged model skips
+  generation entirely and finishes in seconds; the cache is a single
+  `responses.json` you can commit or share between runners. When every case is
+  cached, the model is not loaded at all, so a fully cached run never touches
+  the network or the weights.
+- Batching across cases is not implemented yet: prompts go through the model's
+  own chat template with variable length, and naive padding changes which tokens
+  are scored. Until that is solved honestly, generation stays per-case.
+
+If neither lever applies, budget the run accordingly and read the baseline
+accuracy in the report before trusting a PASS.
+
 ## Honest limits
 
-- Only `fp32` and dynamic `int8` are supported in v1.
+- Only `fp32`, `fp16`, `bf16` and dynamic `int8` are supported in v1. AWQ / GPTQ / GGUF / NF4
+  need external tooling; the adapter is a registry (`src/quant_regress/adapter.py`,
+  `BACKENDS`) so a new backend is a one-function addition, but each must ship
+  with a committed measurement before it is advertised.
 - The library runs generation, so it needs a task whose success is checkable in
   code. It is not an LLM-judge harness.
 - **The bundled `evals/fixtures/collapse.jsonl` is model-specific, and it does

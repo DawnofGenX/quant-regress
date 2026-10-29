@@ -111,6 +111,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--progress-every", type=int, default=25,
                    help="print a progress line every N cases to stderr "
                         "(0 disables). Stdout is never polluted.")
+    p.add_argument("--response-cache", default=None,
+                   help="directory for a prediction cache keyed by "
+                        "(model, precision, prompt). Re-runs skip "
+                        "generation for cached cases.")
     p.add_argument("--version", action=_VersionAction)
     p.add_argument("--dry-run", action="store_true",
                    help="validate the configuration (eval set, precisions, "
@@ -319,6 +323,8 @@ def main(argv: list[str] | None = None) -> int:
         system_prompt=args.system_prompt,
         labels=labels,
         progress=_progress_printer(args.progress_every),
+        model_name=args.model,
+        response_cache_dir=args.response_cache,
     )
     try:
         res = harness.compare(
