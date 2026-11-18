@@ -17,7 +17,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from .evalset import EvalSet, Case, normalise
 
@@ -114,6 +114,11 @@ class PrecisionResult:
     seconds: float
     misclassified: list[str] = field(default_factory=list)
     per_category: dict[str, tuple[int, int]] = field(default_factory=dict)
+    #: The dtype actually measured, e.g. ``"torch.float32"``. Recorded because
+    #: a checkpoint can load in bfloat16 and a mislabelled baseline is exactly
+    #: the kind of quiet lie this gate exists to catch. Empty when every case
+    #: came from the response cache and no model was loaded.
+    model_dtype: str = ""
 
     @property
     def accuracy(self) -> float:
@@ -182,6 +187,7 @@ class ComparisonResult:
                         (self.baseline.accuracy - c.accuracy) * 100.0, 3
                     ),
                     "misclassified": list(c.misclassified),
+                    "dtype": c.model_dtype,
                     "categories": {
                         (k or "uncategorised"): {"correct": cc, "total": tt}
                         for k, (cc, tt) in c.per_category.items()
@@ -277,6 +283,43 @@ class _ResponseCache:
                 json.dump(self._data, f)
         except OSError:
             pass
+
+
+def _measured_dtype(model) -> str:
+    """The dtype of the weights that actually carry the precision claim.
+
+    Linear weights are what ``quantize_dynamic`` swaps and what ``.half()`` /
+    ``.bfloat16()`` cast, so they are the honest signal: a quantized arm reports
+    ``torch.qint8``, fp16 reports ``torch.float16``. Embeddings and norms stay
+    float32 by design and would report the wrong thing. Duck-typed so the
+    harness keeps working when the model object is a test double.
+    """
+    if model is None:
+        return ""
+    named_modules = getattr(model, "named_modules", None)
+    walk: Iterable = named_modules() if callable(named_modules) else ()
+    for _, mod in walk:
+        # A dynamically quantized Linear keeps its dtype on the packed params;
+        # its ``weight`` is a bound method that dequantizes to float32, so
+        # reading weight.dtype off it would report the wrong arm.
+        packed = getattr(mod, "_packed_params", None)
+        packed_dtype = getattr(packed, "dtype", None)
+        if packed_dtype is not None:
+            return str(packed_dtype)
+        weight = getattr(mod, "weight", None)
+        if weight is None or not hasattr(weight, "dtype"):
+            continue
+        if type(mod).__name__.endswith("Linear"):
+            return str(weight.dtype)
+    parameters = getattr(model, "parameters", None)
+    params_iter: Iterable = parameters() if callable(parameters) else ()
+    params = [
+        p for p in params_iter if hasattr(p, "dtype")
+    ]
+    if params:
+        biggest = max(params, key=lambda p: p.numel())
+        return str(biggest.dtype)
+    return ""
 
 
 class QuantHarness:
@@ -454,9 +497,11 @@ class QuantHarness:
         else:
             model = self._factory(precision)
         tok = None
+        model_dtype = ""
         try:
             if model is not None:
                 tok = getattr(model, "tokenizer", None)
+                model_dtype = _measured_dtype(model)
             correct = 0
             mis: list[str] = []
             scored = 0
@@ -491,6 +536,7 @@ class QuantHarness:
                 total=scored,
                 seconds=time.perf_counter() - t0,
                 misclassified=mis,
+                model_dtype=str(model_dtype),
                 per_category={k: (v[0], v[1]) for k, v in cat_counts.items()},
             )
         finally:
