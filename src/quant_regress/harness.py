@@ -175,6 +175,14 @@ class ComparisonResult:
                 # worse is the first question anyone asks, and without the ids
                 # the only answer is "run it again locally".
                 "misclassified": list(self.baseline.misclassified),
+                # Same audit fields as a candidate: the baseline is an arm too,
+                # and a table that states a precision for it without the dtype
+                # that was actually measured is how "fp32" came to mean bf16.
+                "dtype": self.baseline.model_dtype,
+                "categories": {
+                    (k or "uncategorised"): {"correct": cc, "total": tt}
+                    for k, (cc, tt) in self.baseline.per_category.items()
+                },
             },
             "candidates": [
                 {
