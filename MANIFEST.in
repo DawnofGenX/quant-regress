@@ -4,6 +4,9 @@
 # source install got a suite that failed on import-time file lookups. Ship the
 # three directories the tests read.
 include README.md CHANGELOG.md LICENSE
+# The Action surface is part of what the suite checks, so ship it too: tests/
+# test_action_contract.py parses action.yml and shells out to entrypoint.sh.
+include action.yml entrypoint.sh
 recursive-include src/quant_regress *.py
 recursive-include tests *.py
 recursive-include scripts *.py
