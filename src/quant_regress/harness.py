@@ -11,6 +11,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
+from collections import defaultdict
 import math
 import os
 import time
@@ -18,7 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Sequence
 
-from .evalset import EvalSet, normalise
+from .evalset import EvalSet, Case, normalise
 
 from .adapter import SUPPORTED as SUPPORTED_PRECISIONS
 
@@ -112,6 +113,7 @@ class PrecisionResult:
     total: int
     seconds: float
     misclassified: list[str] = field(default_factory=list)
+    per_category: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     @property
     def accuracy(self) -> float:
@@ -129,6 +131,17 @@ class ComparisonResult:
     min_accuracy: float | None = None
     #: Human-readable reason when the floor was breached, else ``None``.
     floor_failure: str | None = None
+    points_per_case: float = 0.0
+    tolerance_reachable: bool = True
+    granularity_warning: str | None = None
+
+    def regressed_ids(self, c: PrecisionResult) -> list[str]:
+        base_wrong = set(self.baseline.misclassified)
+        return [i for i in c.misclassified if i not in base_wrong]
+
+    def recovered_ids(self, c: PrecisionResult) -> list[str]:
+        cand_wrong = set(c.misclassified)
+        return [i for i in self.baseline.misclassified if i not in cand_wrong]
 
     @property
     def baseline_below_floor(self) -> bool:
@@ -169,6 +182,12 @@ class ComparisonResult:
                         (self.baseline.accuracy - c.accuracy) * 100.0, 3
                     ),
                     "misclassified": list(c.misclassified),
+                    "categories": {
+                        (k or "uncategorised"): {"correct": cc, "total": tt}
+                        for k, (cc, tt) in c.per_category.items()
+                    },
+                    "regressed": self.regressed_ids(c),
+                    "recovered": self.recovered_ids(c),
                 }
                 for c in self.candidates
             ],
@@ -177,6 +196,9 @@ class ComparisonResult:
             "min_accuracy": self.min_accuracy,
             "baseline_below_floor": self.baseline_below_floor,
             "floor_failure": self.floor_failure,
+            "points_per_case": self.points_per_case,
+            "tolerance_reachable": self.tolerance_reachable,
+            "granularity_warning": self.granularity_warning,
             "verdict": self.verdict.value,
         }
 
@@ -275,6 +297,7 @@ class QuantHarness:
         model_name: str | None = None,
         response_cache_dir: str | None = None,
     ):
+        self._default_scorer = scorer is None
         if scorer is None:
             def scorer(pred: str, expected: str) -> bool:
                 return normalise(pred) == expected
@@ -290,6 +313,10 @@ class QuantHarness:
         self._cache = _ResponseCache(response_cache_dir, model_name)
 
     # -- public -----------------------------------------------------------
+    def _matches_default(self, pred: str, case: Case) -> bool:
+        got = normalise(pred)
+        return got == case.expected or got in case.accept
+
     def compare(
         self,
         eval_set: EvalSet,
@@ -352,6 +379,20 @@ class QuantHarness:
                     f"{len(eval_set)} cases"
                 )
 
+        points_per_case = 100.0 / len(eval_set)
+        tolerance_reachable = (
+            max_drop_points == 0.0
+            or max_drop_points >= points_per_case - 1e-9
+        )
+        granularity_warning = None
+        if not tolerance_reachable:
+            granularity_warning = (
+                f"tolerance is finer than the eval set can express: {len(eval_set)} cases "
+                f"means one case is {points_per_case:.2f} points, but "
+                f"--max-drop-points is {max_drop_points:g}; in effect ANY new error fails "
+                f"the run. Widen the set or raise the tolerance to >= {points_per_case:.2f}."
+            )
+
         worst = max(
             ((baseline.accuracy - c.accuracy) * 100.0 for c in candidates), default=0.0
         )
@@ -380,6 +421,9 @@ class QuantHarness:
             else Verdict.PASS,
             min_accuracy=min_accuracy,
             floor_failure=floor_failure,
+            points_per_case=points_per_case,
+            tolerance_reachable=tolerance_reachable,
+            granularity_warning=granularity_warning,
         )
 
     # -- internals --------------------------------------------------------
@@ -416,6 +460,7 @@ class QuantHarness:
             correct = 0
             mis: list[str] = []
             scored = 0
+            cat_counts = defaultdict(lambda: [0, 0])
             t0 = time.perf_counter()
             for i, case in enumerate(eval_set, 1):
                 cached = self._cache.get(precision, case.prompt)
@@ -424,9 +469,12 @@ class QuantHarness:
                 else:
                     pred = self._predict(model, tok, case.prompt)
                     self._cache.put(precision, case.prompt, pred)
-                ok = self._scorer(pred, case.expected)
+                ok = self._matches_default(pred, case) if self._default_scorer else self._scorer(pred, case.expected)
                 correct += int(ok)
                 scored += 1
+                cat_counts[case.category][1] += 1
+                if ok:
+                    cat_counts[case.category][0] += 1
                 if not ok:
                     mis.append(case.id)
                 if progress is not None:
@@ -443,6 +491,7 @@ class QuantHarness:
                 total=scored,
                 seconds=time.perf_counter() - t0,
                 misclassified=mis,
+                per_category={k: (v[0], v[1]) for k, v in cat_counts.items()},
             )
         finally:
             # Drop the local reference and force the collection cycle: the

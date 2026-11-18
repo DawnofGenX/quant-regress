@@ -33,6 +33,9 @@ class Case:
     id: str
     prompt: str
     expected: str
+    accept: tuple[str, ...] = ()
+    category: str = ""
+    difficulty: str = ""
 
 
 class EvalSet:
@@ -93,8 +96,29 @@ class EvalSet:
             if cid in seen:
                 raise EvalSetError(f"line {lineno}: duplicate id {cid!r}")
             seen.add(cid)
+            expected = normalise(row["expected"])
+            raw_accept = row.get("accept", ())
+            if isinstance(raw_accept, (str, int, float, bool)):
+                raw_accept = [raw_accept]
+            if not isinstance(raw_accept, (list, tuple)):
+                raise EvalSetError(
+                    f"line {lineno}: 'accept' must be a list of accepted answers, "
+                    f"got {type(raw_accept).__name__}"
+                )
+            accept = tuple(
+                a for a in dict.fromkeys(normalise(x) for x in raw_accept) if a != expected
+            )
+            category = normalise(row.get("category", ""))
+            difficulty = normalise(row.get("difficulty", ""))
             cases.append(
-                Case(id=cid, prompt=str(row["prompt"]), expected=normalise(row["expected"]))
+                Case(
+                    id=cid,
+                    prompt=str(row["prompt"]),
+                    expected=expected,
+                    accept=accept,
+                    category=category,
+                    difficulty=difficulty,
+                )
             )
         if not cases:
             raise EvalSetError(f"eval set is empty: {p}")
