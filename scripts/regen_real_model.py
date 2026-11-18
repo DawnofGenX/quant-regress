@@ -39,20 +39,25 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from quant_regress.adapter import build_model_factory      # noqa: E402
-from quant_regress.evalset import Case, EvalSet             # noqa: E402
+from quant_regress.evalset import EvalSet                   # noqa: E402
 from quant_regress.harness import QuantHarness              # noqa: E402
 
 MODEL = os.environ.get("QUANT_REGRESS_REAL_MODEL", "HuggingFaceTB/SmolLM2-135M-Instruct")
-MAX_NEW_TOKENS = 8
+#: Generous on purpose. 8 tokens truncated every word problem that reasons
+#: before answering, so the old "measurement" scored truncation, not arithmetic:
+#: the same model went from 33% to a much higher baseline purely by letting it
+#: finish a sentence. The scorer takes the LAST numeral, so extra prose is free.
+DEFAULT_MAX_NEW_TOKENS = 32
 
-_DEFAULT_SET_CANDIDATE = ROOT / "evals" / "sets" / "arith-tiered.jsonl"
-_DEFAULT_SET = (
-    _DEFAULT_SET_CANDIDATE
-    if _DEFAULT_SET_CANDIDATE.exists()
-    else ROOT / "evals" / "fixtures" / "collapse.jsonl"
+DEFAULT_SET = ROOT / "evals" / "sets" / "arith-tiered.jsonl"
+
+#: One committed artifact per published table. Without --measure the script
+#: prints all of them, so a single no-argument run yields every number the
+#: README claims and tests/test_claims_are_reproducible.py can check them.
+ARTIFACTS = (
+    ROOT / "results" / "real_model_arith.json",
+    ROOT / "results" / "real_model_classify.json",
 )
-DEFAULT_SET = _DEFAULT_SET
-DEFAULT_OUT = ROOT / "results" / "real_model.json"
 
 
 def numeral(pred: str, expected: str) -> bool:
@@ -73,55 +78,51 @@ def numeral(pred: str, expected: str) -> bool:
     return bool(found) and found[-1] == expected.strip()
 
 
-# Exactly checkable, no ambiguity about what a correct answer is: every prompt demands one
-# numeral, and the scorer compares the normalised completion to the expected numeral.
-ANSWERS = {
-    "What is 7 plus 5?": "12",
-    "What is 9 plus 6?": "15",
-    "What is 13 plus 8?": "21",
-    "What is 24 plus 17?": "41",
-    "What is 50 minus 18?": "32",
-    "What is 64 minus 27?": "37",
-    "What is 100 minus 43?": "57",
-    "What is 6 times 7?": "42",
-    "What is 8 times 9?": "72",
-    "What is 12 times 4?": "48",
-    "A crate holds 15 bottles. Two crates hold how many bottles?": "30",
-    "A shop sells 9 pens a day. How many pens in 7 days?": "63",
-    "There are 40 seats and 27 are taken. How many are free?": "13",
-    "A bus carries 52 people. 19 get off. How many remain?": "33",
-    "Three boxes hold 14 apples each. How many apples in total?": "42",
-    "A bill is 96 and split between 8 people. What does each pay?": "12",
-    "What is 121 minus 64?": "57",
-    "What is 18 plus 29?": "47",
-    "What is 7 times 11?": "77",
-    "A pool has 300 litres. 175 drain out. How many remain?": "125",
-}
+def pick_scorer(eval_set, choice: str):
+    """Return (scorer, label). ``auto`` keeps exact scoring honest per task type.
+
+    A numeral scorer on a sentiment set scores 0/60 at every precision and the
+    gate reports a perfect PASS -- the exact false-green this tool exists to
+    prevent. ``auto`` therefore uses the numeral scorer only when every expected
+    answer is a numeral, and otherwise the harness default (exact match plus the
+    set's declared aliases).
+    """
+    if choice == "numeral":
+        return numeral, "numeral (last number in the completion)"
+    if choice == "default":
+        return None, "default (exact match + declared aliases)"
+    numeric = all(re.fullmatch(r"-?\d+", c.expected.strip()) for c in eval_set)
+    if numeric:
+        return numeral, "numeral (last number in the completion)"
+    return None, "default (exact match + declared aliases)"
 
 
-def build_eval_set() -> EvalSet:
-    return EvalSet([
-        Case(id=f"real-{i:03d}", prompt=f"{q} Answer with the number only.",
-             expected=a)
-        for i, (q, a) in enumerate(ANSWERS.items(), start=1)
-    ])
+def _progress(done: int, total: int, precision: str) -> None:
+    """Keep a redirected log alive: without this a 20-minute CPU run looks dead."""
+    if done == total or done % 10 == 0:
+        print(f"  {precision}: {done}/{total}", file=sys.stderr, flush=True)
 
 
 def print_table(payload: dict) -> None:
     """Print the block the README quotes, so the committed artifact is fully
     auditable from the script's stdout alone.
 
-    Includes per-arm wall-clock seconds and the baseline-vs-floor relationship,
-    because a drop measured from a baseline below the ``--min-accuracy`` floor
-    cannot support a collapse conclusion -- the README must say which side of the
-    floor the baseline sits on, not just the delta.
+    Every precision in the run gets a row, and every row carries the dtype the
+    arm ACTUALLY measured -- a table that says fp32 while the weights are bf16
+    is the exact failure this column exists to prevent. Per-arm seconds and the
+    baseline-vs-floor relationship are included because a drop measured from a
+    baseline below the ``--min-accuracy`` floor cannot support a collapse
+    conclusion.
     """
     b = payload["baseline"]
-    c = payload["candidates"][0]
-    print("| precision | accuracy | correct | seconds |")
-    print("|---|---|---|---|")
-    print(f"| fp32 (baseline) | {b['accuracy'] * 100:.1f}% | {b['correct']}/{b['total']} | {b['seconds']:.1f}s |")
-    print(f"| int8 | {c['accuracy'] * 100:.1f}% | {c['correct']}/{c['total']} | {c['seconds']:.1f}s |")
+    print(f"set: {payload.get('eval', '?')} · model: {payload.get('model', '?')}")
+    print("| precision | accuracy | correct | measured dtype | seconds |")
+    print("|---|---|---|---|---|")
+    print(f"| {b['precision']} (baseline) | {b['accuracy'] * 100:.1f}% | "
+          f"{b['correct']}/{b['total']} | {b.get('dtype') or 'n/a'} | {b['seconds']:.1f}s |")
+    for c in payload["candidates"]:
+        print(f"| {c['precision']} | {c['accuracy'] * 100:.1f}% | "
+              f"{c['correct']}/{c['total']} | {c.get('dtype') or 'n/a'} | {c['seconds']:.1f}s |")
     print(f"\nworst drop: {payload['worst_drop_points']:+.1f} pts -> {payload['verdict'].upper()}")
     floor = payload.get("min_accuracy")
     if floor is not None:
@@ -130,6 +131,11 @@ def print_table(payload: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Line-buffered so a redirected log shows progress instead of a silent hour.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(line_buffering=True)
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--measure", action="store_true",
@@ -137,16 +143,16 @@ def main(argv: list[str] | None = None) -> int:
              "Without it the committed result is printed -- that is the fast path.",
     )
     ap.add_argument(
-        "--set", default=str(DEFAULT_SET),
-        help="path to a JSONL eval set (id, prompt, expected).",
+        "--set", default=None,
+        help=f"path to a JSONL eval set (default: {DEFAULT_SET.name}).",
     )
     ap.add_argument(
         "--precisions", default="fp32,int8",
         help="comma-separated precisions; the first is the baseline.",
     )
     ap.add_argument(
-        "--out", default=str(DEFAULT_OUT),
-        help="where to write (or read, in fast mode) the JSON result.",
+        "--out", default=None,
+        help="where to write the JSON result (default: results/real_model_<set>.json).",
     )
     ap.add_argument(
         "--min-accuracy", type=float, default=None,
@@ -156,29 +162,45 @@ def main(argv: list[str] | None = None) -> int:
         "--max-cases", type=int, default=None,
         help="truncate the eval set to this many cases (smoke runs).",
     )
+    ap.add_argument(
+        "--max-new-tokens", type=int, default=DEFAULT_MAX_NEW_TOKENS,
+        help="decode budget per case (too small measures truncation, not accuracy).",
+    )
+    ap.add_argument(
+        "--scorer", default="auto", choices=["auto", "numeral", "default"],
+        help="auto = numeral for all-numeric answers, exact+aliases otherwise.",
+    )
     args = ap.parse_args(argv)
 
-    set_path = Path(args.set)
+    set_path = Path(args.set or DEFAULT_SET)
     if not set_path.is_absolute():
         set_path = ROOT / set_path
-    out_path = Path(args.out)
-    if not out_path.is_absolute():
-        out_path = ROOT / out_path
+    if args.out:
+        out_path = Path(args.out)
+        if not out_path.is_absolute():
+            out_path = ROOT / out_path
+    else:
+        out_path = ROOT / "results" / f"real_model_{set_path.stem.split('-')[0]}.json"
 
     # Fast path: print the committed artifact when it already exists and an
     # explicit regeneration was not requested. Missing artifact is an error,
     # not an invitation to spend ten minutes of CPU by accident.
     if not args.measure:
-        if not out_path.exists():
-            shown = out_path.relative_to(ROOT) if out_path.is_relative_to(ROOT) else out_path
-            print(f"no committed result at {shown} -- run with --measure first",
-                  file=sys.stderr)
+        explicit = bool(args.out or args.set)
+        paths = [out_path] if explicit else [p for p in ARTIFACTS if p.exists()]
+        missing = [p for p in (paths or [out_path]) if not p.exists()]
+        if missing:
+            for path in missing:
+                shown = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
+                print(f"no committed result at {shown} -- run with --measure first",
+                      file=sys.stderr)
             return 2
-        payload = json.loads(out_path.read_text(encoding="utf-8"))
-        print(f"model: {payload.get('model')}")
-        print("(printed from the committed run; pass --measure to regenerate)")
-        print()
-        print_table(payload)
+        for i, path in enumerate(paths):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if i:
+                print()
+            print("(printed from the committed run; pass --measure to regenerate)")
+            print_table(payload)
         return 0
 
     precisions = [p.strip() for p in args.precisions.split(",") if p.strip()]
@@ -192,12 +214,15 @@ def main(argv: list[str] | None = None) -> int:
     es = EvalSet.load(set_path)
     if args.max_cases is not None and args.max_cases < len(es):
         es = EvalSet(list(es)[: args.max_cases])
-    print(f"cases: {len(es)} · precisions: {', '.join(precisions)} · max_new_tokens: {MAX_NEW_TOKENS}")
+    scorer, scorer_label = pick_scorer(es, args.scorer)
+    print(f"cases: {len(es)} · precisions: {', '.join(precisions)} · "
+          f"max_new_tokens: {args.max_new_tokens} · scorer: {scorer_label}")
 
-    factory = build_model_factory(MODEL, max_new_tokens=MAX_NEW_TOKENS)
+    factory = build_model_factory(MODEL, max_new_tokens=args.max_new_tokens)
     harness = QuantHarness(
-        model_factory=factory, max_new_tokens=MAX_NEW_TOKENS,
-        scorer=numeral,
+        model_factory=factory, max_new_tokens=args.max_new_tokens,
+        scorer=scorer,
+        progress=_progress,
     )
 
     res = harness.compare(
@@ -215,7 +240,8 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError:
         payload["eval"] = str(set_path)
     payload["points_per_case"] = round(100 / len(es), 3)
-    payload["max_new_tokens"] = MAX_NEW_TOKENS
+    payload["max_new_tokens"] = args.max_new_tokens
+    payload["scorer"] = scorer_label
     payload["wall_seconds"] = round(time.time() - started, 1)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
