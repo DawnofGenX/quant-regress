@@ -29,6 +29,33 @@ from .harness import (
     _check_threshold,
 )
 
+def _granularity_check(eval_set, max_drop_points, strict):
+    """Print the granularity warning and return an exit code when strict.
+
+    Returns 2 when strict and the tolerance is unreachable, else None.
+    """
+    if not len(eval_set):
+        return None
+    points_per_case = 100.0 / len(eval_set)
+    tolerance_reachable = (
+        max_drop_points == 0.0
+        or max_drop_points >= points_per_case - 1e-9
+    )
+    if tolerance_reachable:
+        return None
+    warning = (
+        f"tolerance is finer than the eval set can express: {len(eval_set)} cases "
+        f"means one case is {points_per_case:.2f} points, but "
+        f"--max-drop-points is {max_drop_points:g}; in effect ANY new error fails "
+        f"the run. Widen the set or raise the tolerance to >= {points_per_case:.2f}."
+    )
+    print(f"warning: {warning}", file=sys.stderr)
+    if strict:
+        print("error: --strict-granularity and an unreachable tolerance", file=sys.stderr)
+        return 2
+    return None
+
+
 EXIT_OK, EXIT_REGRESSION, EXIT_USAGE = 0, 1, 2
 
 #: Output formats the CLI can emit. `text` is the human table, `json` is the
@@ -80,6 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--baseline-precision", default="fp32")
     p.add_argument("--max-drop-points", type=float, default=2.0,
                    help="fail if any candidate drops more than this many points")
+    p.add_argument("--strict-granularity", action="store_true",
+                   help="Exit 2 when --max-drop-points is finer than one case in the eval set.")
     p.add_argument("--min-accuracy", type=float, default=None,
                    help="fail if the BASELINE scores below this fraction "
                         "(0.5 = 50%%). Without it, a model that is wrong at every "
@@ -137,6 +166,16 @@ def _markdown(res) -> str:
             f"| {c.precision} | {c.accuracy*100:.1f}% | {c.correct}/{c.total} | "
             f"{drop:+.1f} pts |"
         )
+    for c in res.candidates:
+        if c.per_category:
+            lines.append("")
+            lines.append(f"Categories ({c.precision}):")
+            for cat, (cc, tt) in c.per_category.items():
+                label = cat or "uncategorised"
+                lines.append(f"- {label}: {cc}/{tt}")
+        regressed = res.regressed_ids(c)
+        if regressed:
+            lines.append(f"Regressed cases ({c.precision}): {', '.join(regressed)}")
     return "\n".join(lines)
 
 
@@ -169,6 +208,16 @@ def _junit(res) -> ET.Element:
                 f"candidate {result.accuracy * 100:.1f}%. "
                 f"Misclassified: {failed_ids or 'none recorded'}"
             )
+        # Per-case entries: one <testcase> per misclassified case id, so a
+        # single regression points at the exact cases that flipped.
+        for cid in result.misclassified:
+            pc = ET.SubElement(
+                suite, "testcase",
+                classname=f"quant_regress.{precision}",
+                name=f"{precision}/{cid}",
+            )
+            failures += 1
+            ET.SubElement(pc, "failure", message=f"misclassified at {precision}")
     if res.floor_failure:
         failures += 1
         case = ET.SubElement(suite, "testcase", name="baseline_quality_floor")
@@ -278,6 +327,9 @@ def main(argv: list[str] | None = None) -> int:
         except EvalSetError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return EXIT_USAGE
+        rc = _granularity_check(eval_set, args.max_drop_points, args.strict_granularity)
+        if rc is not None:
+            return rc
         print(
             f"dry run: configuration is valid "
             f"({len(eval_set)} cases in {args.eval}; "
@@ -293,6 +345,9 @@ def main(argv: list[str] | None = None) -> int:
     except EvalSetError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    rc = _granularity_check(eval_set, args.max_drop_points, args.strict_granularity)
+    if rc is not None:
+        return rc
     if not args.model:
         print(
             "error: --model is required (e.g. --model "

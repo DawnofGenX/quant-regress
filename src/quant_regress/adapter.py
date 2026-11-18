@@ -1,5 +1,13 @@
 """Build real models at a requested precision.
 
+Every arm states its dtype and then *enforces* it. transformers 5.x loads a
+checkpoint in the dtype its config declares — ``Qwen/Qwen2.5-0.5B-Instruct``
+and ``HuggingFaceTB/SmolLM2-135M-Instruct`` both arrive as bfloat16 — so an
+"fp32" arm that merely returned the model untouched was measuring bf16 and
+calling it fp32, and ``quantize_dynamic`` then died with
+``RuntimeError: expected scalar type Float but found BFloat16``. The baseline
+label is the whole premise of the comparison, so it is cast, not assumed.
+
 Only dynamic ``quantize_dynamic`` INT8 is supported. That is deliberate:
 
 * it needs no extra dependency (no autoawq / optimum / onnxruntime),
@@ -103,6 +111,10 @@ def _quantize_int8(model):
     a small encoder with a handful of Linear layers was accepted, its "int8"
     arm was fp32 in all but name, and the gate compared a model against itself.
     """
+    # quantize_dynamic's kernels are float32-only: on a checkpoint loaded in
+    # bfloat16 the swap raises RuntimeError: expected scalar type Float but
+    # found BFloat16. Widen first; the packed int8 copy is what gets returned.
+    model = model.float()
     quantized = torch.ao.quantization.quantize_dynamic(
         model, {torch.nn.Linear}, dtype=torch.qint8
     )
@@ -133,8 +145,9 @@ def _quantize_int8(model):
 # Precision backends. Single source of truth for what build_model_factory (and
 # therefore the CLI and the harness) accepts. Adding a backend here exposes it
 # end-to-end. Order is the order precisions are advertised in help text.
-def _identity(model):
-    return model
+def _to_fp32(model):
+    """Widen to float32 — the baseline every other arm is compared against."""
+    return model.float()
 
 
 def _to_fp16(model):
@@ -146,7 +159,7 @@ def _to_bf16(model):
 
 
 BACKENDS: dict[str, callable] = {
-    "fp32": _identity,
+    "fp32": _to_fp32,
     "fp16": _to_fp16,
     "bf16": _to_bf16,
     "int8": _quantize_int8,
@@ -188,12 +201,11 @@ def build_model_factory(
                 "Check the model id, and that the runner has disk space "
                 "(a 1B model is ~2 GB, a 7B model is ~14 GB)."
             ) from exc
-        if p != "fp32":
-            transformed = BACKENDS[p](model)
-            if transformed is not model:
-                del model
-                gc.collect()
-            model = transformed
+        transformed = BACKENDS[p](model)
+        if transformed is not model:
+            del model
+            gc.collect()
+        model = transformed
         # Cast to CPU for all backends (quantized kernels are CPU-only).
         model = model.to("cpu").eval()
         model.tokenizer = tok  # attached for the harness

@@ -508,6 +508,21 @@ def test_report_records_the_floor_and_its_outcome(tmp_path):
     assert d["floor_failure"]
 
 
+def test_report_records_the_baseline_dtype_and_categories(tmp_path):
+    """The baseline is an arm, not a reference label.
+
+    ``results/real_model.json`` shipped a table that said ``fp32`` above numbers
+    actually produced by bf16 weights, because only candidates carried the
+    measured dtype. Recording it for the baseline is what makes that mislabel
+    impossible to publish again.
+    """
+    es = _eval(tmp_path, n=4)
+    h = QuantHarness(model_factory=lambda p: _FakeModel(p, correct=(p == "fp32")))
+    d = h.compare(es, candidate_precisions=["int8"]).to_dict()
+    assert "dtype" in d["baseline"], d["baseline"].keys()
+    assert "categories" in d["baseline"], d["baseline"].keys()
+
+
 # --------------------------------------------------------------------------
 # The real HF generate path.
 #

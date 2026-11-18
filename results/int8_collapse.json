@@ -5,7 +5,14 @@
     "correct": 20,
     "total": 20,
     "seconds": 0.0,
-    "misclassified": []
+    "misclassified": [],
+    "dtype": "",
+    "categories": {
+      "uncategorised": {
+        "correct": 20,
+        "total": 20
+      }
+    }
   },
   "candidates": [
     {
@@ -36,7 +43,37 @@
         "collapse-018",
         "collapse-019",
         "collapse-020"
-      ]
+      ],
+      "dtype": "",
+      "categories": {
+        "uncategorised": {
+          "correct": 0,
+          "total": 20
+        }
+      },
+      "regressed": [
+        "collapse-001",
+        "collapse-002",
+        "collapse-003",
+        "collapse-004",
+        "collapse-005",
+        "collapse-006",
+        "collapse-007",
+        "collapse-008",
+        "collapse-009",
+        "collapse-010",
+        "collapse-011",
+        "collapse-012",
+        "collapse-013",
+        "collapse-014",
+        "collapse-015",
+        "collapse-016",
+        "collapse-017",
+        "collapse-018",
+        "collapse-019",
+        "collapse-020"
+      ],
+      "recovered": []
     }
   ],
   "worst_drop_points": 100.0,
@@ -44,5 +81,8 @@
   "min_accuracy": null,
   "baseline_below_floor": false,
   "floor_failure": null,
+  "points_per_case": 5.0,
+  "tolerance_reachable": false,
+  "granularity_warning": "tolerance is finer than the eval set can express: 20 cases means one case is 5.00 points, but --max-drop-points is 2; in effect ANY new error fails the run. Widen the set or raise the tolerance to >= 5.00.",
   "verdict": "fail"
 }

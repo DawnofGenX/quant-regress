@@ -434,3 +434,23 @@ def test_junit_output_is_valid_xml_with_a_named_failing_case(tmp_path, monkeypat
     assert any("misclassified" in (tc.find("failure").text or "").lower()
                or "correct" in (tc.find("failure").text or "").lower()
                for tc in failed), "the failure carries no case detail"
+
+
+def test_response_cache_input_declared_with_empty_default():
+    import yaml
+
+    action = yaml.safe_load((ROOT / "action.yml").read_text(encoding="utf-8"))
+    inputs = action["inputs"]
+    assert "response-cache" in inputs
+    assert inputs["response-cache"].get("default", None) == ""
+
+
+def test_response_cache_whitelist_and_forwarded():
+    entrypoint = ENTRYPOINT.read_text(encoding="utf-8")
+    # whitelist line
+    whitelist_lines = [ln for ln in entrypoint.splitlines()
+                      if "--response-cache" in ln and "|" in ln]
+    assert whitelist_lines, "no whitelist line contains --response-cache"
+    # final set -- construction
+    assert any("--response-cache" in ln and 'set -- "$@"' in ln
+               for ln in entrypoint.splitlines())

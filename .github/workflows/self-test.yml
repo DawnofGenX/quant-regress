@@ -27,6 +27,19 @@ jobs:
       - name: Pin the exit-code contract
         run: python -m pytest tests/test_selftest_gate.py tests/test_cli.py -v
 
+      # The eval sets ARE the measurement: a set that cannot distinguish a
+      # dropped case (too few cases for the tolerance, or answers so vague that
+      # any greedy decode matches) makes a green gate meaningless. These tests
+      # pin the shipped sets' shape, the alias/metadata schema, the Action's
+      # flag surface, and the dtype each precision actually produces.
+      - name: Pin the measurement, not just the plumbing
+        run: |
+          python -m pytest \
+            tests/test_eval_sets_arith.py \
+            tests/test_eval_sets_classify.py \
+            tests/test_action_contract.py \
+            tests/test_adapter_dtype.py -v
+
   action-container:
     name: action container builds and runs
     runs-on: ubuntu-latest

@@ -4,28 +4,75 @@ All notable changes to quant-regress. This project is pre-1.0 stable in API but 
 `v1` GitHub Action tag is what users are told to pin, so **action-visible changes are
 called out here as breaking**.
 
-## Unreleased
+## 1.2.0
 
-### Added — the README leads with a real-checkpoint measurement
+### Changed — the eval scenario is no longer a single 20-case arithmetic stub
 
-- **`scripts/regen_real_model.py` + `results/real_model.json`** measure a real
-  instruction-tuned causal LM (`Qwen/Qwen2.5-0.5B-Instruct`) at fp32 and dynamic
-  int8 on 20 single-answer arithmetic word problems, through the same
-  `QuantHarness`/adapter path the Action uses. The committed run shows an 80.0%
-  fp32 baseline (above the `--min-accuracy` floor) collapsing to 0.0% at int8 —
-  a real, dramatic int8 collapse, verified against the raw completions (the
-  quantized model degrades into conversational filler instead of the answer).
-- **The README now leads with this real measurement** (`claim:real-model`), with
-  the previous stub table (`claim:int8-collapse`) kept below it as an explicitly
-  labelled controlled reproduction. The stub is a demonstration of the gate's
-  arithmetic, not a model measurement; the README says so, and keeps the note
-  that the `AutoModelForCausalLM` adapter cannot load a cross-encoder at all.
-- **`tests/test_claims_are_reproducible.py` now pins the real-model table** to the
-  committed artifact: the fast path of `regen_real_model.py` (no `--measure`)
-  prints the committed run, and the test fails if a README figure stops matching
-  it. `--measure` is the expensive reproduction a human runs to regenerate the
-  artifact; it is deliberately not what the test runs, so the suite stays fast
-  and deterministic.
+The published measurement used to be 20 one-step word problems with
+`--max-drop-points 2.0`. At 20 cases one case is worth 5.00 points, so a
+2-point tolerance was unreachable: the gate silently enforced "zero new
+errors", and nothing told the user their threshold was finer than the set could
+express. Both eval sets are now 60 cases (1.67 points per case), the harness
+computes granularity, and the CLI says so.
+
+- **`evals/sets/arith-tiered.jsonl`** — 60 arithmetic word problems, 20 each at
+  `easy` (one step), `medium` (three addends or a division step) and `hard`
+  (distractor clause), spread across add/sub/mul/div.
+- **`evals/sets/classify.jsonl`** — 60 sentiment cases (30 positive / 30
+  negative) with **declared answer aliases** (`pos`, `positive`, `Positive.`),
+  so a task whose label vocabulary is closed is scored exactly instead of by
+  numeral extraction.
+- **`Case` gained `accept`, `category` and `difficulty`.** `accept` is a
+  validated list of extra accepted answers; an alias equal to `expected` is
+  dropped, and a bad value raises `EvalSetError` naming the line. Both extra
+  fields are carried into every report, so a regression can be read per task
+  family and per difficulty tier instead of as one aggregate number.
+- **`ComparisonResult` reports `points_per_case`, `tolerance_reachable`,
+  `granularity_warning`, `regressed`/`recovered` case ids and per-category
+  tallies.** `--strict-granularity` turns the warning into exit 2 *before any
+  model is loaded*.
+- **The markdown and JUnit reports name the cases.** Markdown gains a
+  per-category table and a "Regressed cases" list; JUnit gains one
+  `<testcase classname="quant_regress.int8" name="int8/arith-e03">` per case,
+  so a red build points at a case rather than at a percentage.
+
+### Fixed — `fp32` was not fp32
+
+`transformers` loads a checkpoint in the dtype named by its config;
+`Qwen/Qwen2.5-0.5B-Instruct` declares `bfloat16`. The `fp32` backend was
+`return model`, so the arm labelled fp32 ran bf16 weights, and
+`quantize_dynamic` then raised `expected scalar type Float but found BFloat16`
+on exactly those checkpoints. `--precision fp32` now casts with `model.float()`,
+int8 casts before quantizing, and every arm records the dtype it actually
+measured (`torch.float32`, `torch.bfloat16`, `torch.qint8`) in the report — the
+baseline included, because the mislabel was possible precisely because only
+candidates carried it.
+
+### Fixed — the measuring tool could manufacture a false green
+
+`regen_real_model.py` scored every set with the numeral scorer. On the
+sentiment set that produced 0/60 at *both* precisions: a perfectly flat
+comparison, and the gate printed `PASS`. `--scorer auto` (new default) uses the
+numeral scorer only when every expected answer is a numeral and the harness
+default (exact match + declared aliases) otherwise, and records the choice in
+the artifact. `--max-new-tokens` now defaults to 32 instead of 8, because 8
+truncated every word problem that reasons before answering — the old figures
+measured truncation.
+
+### Added — the Action can reach the response cache
+
+`--response-cache` existed in the CLI but `action.yml` and the entrypoint
+whitelist did not know it, so the feature was unreachable from the Action.
+`response-cache` is now an input, passed through only when non-empty.
+
+### Added — the published measurement covers both task families
+
+`scripts/regen_real_model.py` regenerates `results/real_model_arith.json` and
+`results/real_model_classify.json`, prints per-category and per-difficulty
+tables, and in its no-argument fast path prints every committed artifact, so all
+numbers the README quotes come from one command. `--set`, `--precisions`,
+`--out`, `--min-accuracy`, `--max-cases`, `--max-new-tokens` and `--scorer` make
+a different checkpoint or a smoke run a one-liner.
 
 ## 1.1.0
 
