@@ -166,11 +166,13 @@ def main(argv: list[str] | None = None) -> int:
         out_path = ROOT / out_path
 
     # Fast path: print the committed artifact when it already exists and an
-    # explicit regeneration was not requested.
-    if not args.measure and out_path.exists():
+    # explicit regeneration was not requested. Missing artifact is an error,
+    # not an invitation to spend ten minutes of CPU by accident.
+    if not args.measure:
         if not out_path.exists():
-            print(f"no committed result at {out_path.relative_to(ROOT) if out_path.is_relative_to(ROOT) else out_path} "
-                  f"-- run with --measure first", file=sys.stderr)
+            shown = out_path.relative_to(ROOT) if out_path.is_relative_to(ROOT) else out_path
+            print(f"no committed result at {shown} -- run with --measure first",
+                  file=sys.stderr)
             return 2
         payload = json.loads(out_path.read_text(encoding="utf-8"))
         print(f"model: {payload.get('model')}")
