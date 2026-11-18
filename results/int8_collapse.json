@@ -5,7 +5,14 @@
     "correct": 20,
     "total": 20,
     "seconds": 0.0,
-    "misclassified": []
+    "misclassified": [],
+    "dtype": "",
+    "categories": {
+      "uncategorised": {
+        "correct": 20,
+        "total": 20
+      }
+    }
   },
   "candidates": [
     {

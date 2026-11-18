@@ -16,33 +16,66 @@ accuracy drops past a threshold you set.
 ## Measured on a real checkpoint
 
 The headline is a real measurement, not a stub. `scripts/regen_real_model.py`
-loads a real instruction-tuned causal LM — **Qwen/Qwen2.5-0.5B-Instruct** — and
-runs 20 single-answer arithmetic word problems through the same `QuantHarness`
-and adapter path the GitHub Action uses: an fp32 baseline and a dynamic-int8
-candidate, scored on the numeral the model produces. The fp32 baseline clears
-the `--min-accuracy` floor, so the int8 delta below is a real comparison, not a
-measurement from a model that cannot do the task.
+loads **Qwen/Qwen2.5-0.5B-Instruct** and runs two 60-case eval sets through the
+same `QuantHarness` and adapter path the GitHub Action uses — one where the task
+is arithmetic word problems (numeral-scored), one where it is sentiment
+classification (exact match plus declared aliases). Both sets are 60 cases, so
+one case is worth 1.67 points and a 2-point tolerance is reachable; the scorer
+is chosen per set, and every arm records the dtype it actually measured.
+
+### Arithmetic: int8 destroys the capability
 
 <!-- claim:real-model -->
-| precision | accuracy | correct | seconds |
+| precision | accuracy | correct | measured dtype |
 |---|---|---|---|
-| fp32 (baseline) | 80.0% <!-- claim:real-model --> | 16/20 | 81.4s |
-| int8 | 0.0% <!-- claim:real-model --> | 0/20 | 154.2s |
+| fp32 (baseline) | 33.3% <!-- claim:real-model --> | 20/60 <!-- claim:real-model --> | torch.float32 |
+| int8 | 3.3% <!-- claim:real-model --> | 2/60 <!-- claim:real-model --> | torch.qint8 |
+| bf16 | 33.3% <!-- claim:real-model --> | 20/60 <!-- claim:real-model --> | torch.bfloat16 |
 
-worst drop: +80.0 pts -> FAIL <!-- claim:real-model -->
+worst drop: +30.0 pts -> FAIL <!-- claim:real-model -->
 
-baseline 80.0% is above the --min-accuracy floor (0.5) <!-- claim:real-model -->
+baseline 33.3% is above the --min-accuracy floor (0.3) <!-- claim:real-model -->
 
-That is the failure this action exists to catch, on a real checkpoint: the
-quantized model still runs and still returns text, but the text is wrong. The
-int8 completions degrade into conversational filler ("To find the number that
-is 7", "I'm here to answer any question you") instead of the answer, so a
-token-level proxy that only looks at the distribution can clear it while the
-task eval — which asks for the numeral — cannot. Regenerate with
-`python scripts/regen_real_model.py --measure` (CPU, several minutes); the
-committed run is at [`results/real_model.json`](results/real_model.json), and
-`tests/test_claims_are_reproducible.py` fails the build if a number in this
-table stops matching the script's output.
+Read this table for the delta, not for the model. A 0.5B checkpoint is only
+partly competent at these word problems, and the tiers show how uneven that is:
+`easy` cases (one step) are mostly solved, `medium` (three addends, a division
+step) mostly are not, and the non-monotonic `hard` row is the reason the set is
+worth reading per tier instead of in aggregate.
+
+| arm | difficulty | correct |
+|---|---|---|
+| fp32 | easy | 12/20 <!-- claim:real-model --> |
+| fp32 | medium | 2/20 <!-- claim:real-model --> |
+| fp32 | hard | 6/20 <!-- claim:real-model --> |
+
+`bf16` matches `fp32` case for case, which is the useful negative result: the
+half-precision backend is not what breaks the model, and the `measured dtype`
+column is what makes that claim checkable rather than asserted.
+
+### Sentiment: a competent baseline, and the same collapse
+
+<!-- claim:real-model -->
+| precision | accuracy | correct | measured dtype |
+|---|---|---|---|
+| fp32 (baseline) | 98.3% <!-- claim:real-model --> | 59/60 <!-- claim:real-model --> | torch.float32 |
+| int8 | 3.3% <!-- claim:real-model --> | 2/60 <!-- claim:real-model --> | torch.qint8 |
+
+worst drop: +95.0 pts -> FAIL <!-- claim:real-model -->
+
+baseline 98.3% is above the --min-accuracy floor (0.5) <!-- claim:real-model -->
+
+This is the table to quote. The same checkpoint classifies 59 of 60 reviews
+correctly at fp32 and 2 of 60 at dynamic int8: the quantized model still runs,
+still returns a label, and is wrong almost every time. A token-level proxy that
+only watches the output distribution clears that; a task eval does not.
+
+Regenerate everything with one command — `python scripts/regen_real_model.py`
+with no flags prints both committed runs, and `--measure` re-runs the model on
+CPU (about two minutes for both sets on 24 cores). The committed artifacts are
+[`results/real_model_arith.json`](results/real_model_arith.json) and
+[`results/real_model_classify.json`](results/real_model_classify.json), and
+`tests/test_claims_are_reproducible.py` fails the build if a number in these
+tables stops matching the script's output.
 
 ### The controlled reproduction (stub)
 
@@ -213,6 +246,21 @@ accuracy in the report before trusting a PASS.
   drop, and the gate correctly reports PASS. It is also driven by a stub model
   exposing `.answer()`, so it tells you nothing about real decoding. Use it to
   see the output format; bring your own eval for a real check.
+- **60 cases is 1.67 points per case.** That is the smallest drop the bundled
+  sets can express; a `--max-drop-points` finer than 1.67 is unreachable and the
+  CLI now warns (and exits `2` with `--strict-granularity`). Bigger sets buy
+  resolution, not credibility — 600 cases resolve 0.17 points and cost ten times
+  the CPU.
+- **The `easy` / `medium` / `hard` tiers describe the problem, not a measured
+  pass rate.** They are assigned by construction — one step, three addends or a
+  division step, a distractor clause — so a weak checkpoint can score `hard`
+  above `medium`. Read the per-tier table as "where did it break", not as a
+  curriculum.
+- **The published numbers are one checkpoint on one CPU box, greedy decoding.**
+  They say what dynamic int8 did to `Qwen/Qwen2.5-0.5B-Instruct` on 120 cases;
+  they do not rank quantization methods, and they are not a claim about larger
+  checkpoints. What generalises is the gate: point it at your model, your task
+  and your tolerance, and it answers for that combination.
 ### Change is not quality — read this before trusting a PASS
 
 The gate's default judgement is about *change*: it fails when quantization costs

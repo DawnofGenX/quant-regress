@@ -130,6 +130,51 @@ def print_table(payload: dict) -> None:
         print(f"baseline {b['accuracy'] * 100:.1f}% is {rel} the --min-accuracy floor ({floor})")
 
 
+def _difficulty_groups(eval_set) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+    for case in eval_set:
+        label = getattr(case, "difficulty", "") or ""
+        if label:
+            groups.setdefault(label, []).append(case.id)
+    return groups
+
+
+def print_breakdown(payload: dict, eval_set=None) -> None:
+    """Category and difficulty rows.
+
+    "int8 collapses everywhere" and "int8 collapses only on multi-step cases"
+    are different findings, and the aggregate table cannot tell them apart.
+    Printed here so the README's per-group claims are auditable from stdout
+    exactly like the headline numbers.
+    """
+    arms = [payload["baseline"], *payload["candidates"]]
+    if any(arm.get("categories") for arm in arms):
+        print("\n| arm | category | correct |")
+        print("|---|---|---|")
+        for arm in arms:
+            for name, c in sorted((arm.get("categories") or {}).items()):
+                print(f"| {arm['precision']} | {name} | {c['correct']}/{c['total']} |")
+    groups = _difficulty_groups(eval_set) if eval_set is not None else {}
+    if groups:
+        print("\n| arm | difficulty | correct |")
+        print("|---|---|---|")
+        for arm in arms:
+            wrong = set(arm.get("misclassified") or [])
+            for name, ids in groups.items():
+                ok = sum(1 for i in ids if i not in wrong)
+                print(f"| {arm['precision']} | {name} | {ok}/{len(ids)} |")
+
+
+def _load_set_for(payload: dict):
+    rel = payload.get("eval")
+    if not rel:
+        return None
+    try:
+        return EvalSet.load(ROOT / rel)
+    except Exception:  # a printed summary must never die on a missing set
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     # Line-buffered so a redirected log shows progress instead of a silent hour.
     for stream in (sys.stdout, sys.stderr):
@@ -201,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
                 print()
             print("(printed from the committed run; pass --measure to regenerate)")
             print_table(payload)
+            print_breakdown(payload, _load_set_for(payload))
         return 0
 
     precisions = [p.strip() for p in args.precisions.split(",") if p.strip()]
@@ -248,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
     out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     print_table(payload)
+    print_breakdown(payload, es)
     if args.min_accuracy is not None and payload["baseline"]["accuracy"] < args.min_accuracy:
         print("NOTE: the baseline itself is below the --min-accuracy floor -- read this as 'this model "
               "cannot do the task', not as a pass on quality.")
