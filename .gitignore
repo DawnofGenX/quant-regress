@@ -11,7 +11,8 @@ build/
 results/*
 !results/int8_collapse.json
 !results/quiet_model.json
-!results/real_model.json
+!results/real_model_arith.json
+!results/real_model_classify.json
 
 # Secrets and local credentials — never commit these
 .env
