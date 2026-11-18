@@ -1,29 +1,28 @@
-"""Measure a REAL model at fp32 and int8 — replacing the stub the headline used to rest on.
+"""Measure a real model across selectable precisions and eval sets.
 
-The README's lead table came from ``scripts/regen_int8_collapse.py``, whose model is
-``_CollapseModel``: a stub that returns "yes" at fp32 and "no" at int8. That is a
-demonstration of the gate's arithmetic, not a measurement of quantization, and the README
-now says so. This script is the missing half: a real checkpoint, a real task, the same
-harness the action uses.
+The published tables under ``results/`` are produced by this script. It runs a
+real checkpoint through the same ``QuantHarness``/adapter path the GitHub Action
+uses, over an eval set you choose, and writes a JSON artifact plus the table
+the README quotes.
 
-What it does
-------------
-* loads a real instruction-tuned causal LM (small enough for CPU, real weights),
-* runs a 20-item task with exactly checkable answers through the same
-  ``QuantHarness``/adapter path the GitHub Action uses (fp32 baseline, int8 candidate),
-* writes ``results/real_model.json`` and prints the table the README quotes.
+The eval set is selectable (``--set``), as are the precisions (``--precisions``),
+the output path (``--out``), the baseline-quality floor (``--min-accuracy``) and
+a case cap for smoke runs (``--max-cases``). Nothing here is hard-coded to a
+single task: point ``--set`` at any JSONL eval set and the measurement runs.
 
 Honest outcomes, all publishable
 --------------------------------
 The gate measures a CHANGE. Dynamic int8 on a small model either costs accuracy
-(the failure the tool exists to catch), or it does not (a PASS — which is the
-correct verdict, not a failed experiment), or the model cannot do the task at either
-precision (the ``--min-accuracy`` floor from 1.0.3 catches that as FAIL). Whichever
-happens, it is measured rather than asserted, and the script prints which one it was.
+(the failure the tool exists to catch), or it does not (a PASS -- which is the
+correct verdict, not a failed experiment), or the model cannot do the task at
+either precision (the ``--min-accuracy`` floor catches that as FAIL). Whichever
+happens, it is measured rather than asserted, and the script prints which one
+it was.
 
 Run:
-    /usr/bin/python3 scripts/regen_real_model.py
-    QUANT_REGRESS_REAL_MODEL=<hf-id> /usr/bin/python3 scripts/regen_real_model.py
+    /home/hermes/citesure/.venv/bin/python scripts/regen_real_model.py --measure
+    QUANT_REGRESS_REAL_MODEL=<hf-id> /home/hermes/citesure/.venv/bin/python \\
+        scripts/regen_real_model.py --measure --set evals/fixtures/collapse.jsonl
 """
 
 from __future__ import annotations
@@ -45,7 +44,15 @@ from quant_regress.harness import QuantHarness              # noqa: E402
 
 MODEL = os.environ.get("QUANT_REGRESS_REAL_MODEL", "HuggingFaceTB/SmolLM2-135M-Instruct")
 MAX_NEW_TOKENS = 8
-RESULTS = ROOT / "results" / "real_model.json"
+
+_DEFAULT_SET_CANDIDATE = ROOT / "evals" / "sets" / "arith-tiered.jsonl"
+_DEFAULT_SET = (
+    _DEFAULT_SET_CANDIDATE
+    if _DEFAULT_SET_CANDIDATE.exists()
+    else ROOT / "evals" / "fixtures" / "collapse.jsonl"
+)
+DEFAULT_SET = _DEFAULT_SET
+DEFAULT_OUT = ROOT / "results" / "real_model.json"
 
 
 def numeral(pred: str, expected: str) -> bool:
@@ -55,7 +62,7 @@ def numeral(pred: str, expected: str) -> bool:
     score, and both of which produced a 0/20 "measurement":
 
     1. Exact-string equality scored 0/20 because a model answers "The answer is 12." rather
-       than "12" — that measures verbosity, not arithmetic.
+       than "12" -- that measures verbosity, not arithmetic.
     2. First-numeral extraction also scored 0/20, because a 135M model answers
        "7 + 5 = 12": the first numeral is the operand it echoed, not the result.
 
@@ -64,6 +71,7 @@ def numeral(pred: str, expected: str) -> bool:
     """
     found = re.findall(r"-?\d[\d,]*", pred.replace(",", ""))
     return bool(found) and found[-1] == expected.strip()
+
 
 # Exactly checkable, no ambiguity about what a correct answer is: every prompt demands one
 # numeral, and the scorer compares the normalised completion to the expected numeral.
@@ -105,7 +113,7 @@ def print_table(payload: dict) -> None:
 
     Includes per-arm wall-clock seconds and the baseline-vs-floor relationship,
     because a drop measured from a baseline below the ``--min-accuracy`` floor
-    cannot support a collapse conclusion — the README must say which side of the
+    cannot support a collapse conclusion -- the README must say which side of the
     floor the baseline sits on, not just the delta.
     """
     b = payload["baseline"]
@@ -125,66 +133,97 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--measure", action="store_true",
-        help="load the model and regenerate results/real_model.json (CPU, several minutes). "
-             "Without it the committed result is printed — that is the fast path the claims "
-             "test uses to pin the README to the artifact.",
+        help="load the model and regenerate the output (CPU, several minutes). "
+             "Without it the committed result is printed -- that is the fast path.",
+    )
+    ap.add_argument(
+        "--set", default=str(DEFAULT_SET),
+        help="path to a JSONL eval set (id, prompt, expected).",
+    )
+    ap.add_argument(
+        "--precisions", default="fp32,int8",
+        help="comma-separated precisions; the first is the baseline.",
+    )
+    ap.add_argument(
+        "--out", default=str(DEFAULT_OUT),
+        help="where to write (or read, in fast mode) the JSON result.",
+    )
+    ap.add_argument(
+        "--min-accuracy", type=float, default=None,
+        help="fail if the BASELINE scores below this fraction (0.5 = 50%%).",
+    )
+    ap.add_argument(
+        "--max-cases", type=int, default=None,
+        help="truncate the eval set to this many cases (smoke runs).",
     )
     args = ap.parse_args(argv)
 
-    # claim:real-model — the fast path is what tests/test_claims_are_reproducible.py
-    # executes. It prints the committed artifact (results/real_model.json) and
-    # nothing else, so the README's real-model table is pinned to the committed
-    # run: mutate a figure in the README and the claims test fails, because the
-    # number no longer appears in this output. `--measure` is the expensive
-    # reproduction (loads the checkpoint, ~minutes on CPU) that a human runs to
-    # regenerate the artifact; it is deliberately NOT what the test runs, so the
-    # suite stays fast and deterministic.
-    if not args.measure:
-        if not RESULTS.exists():
-            print(f"no committed result at {RESULTS.relative_to(ROOT)} — run with --measure first",
-                  file=sys.stderr)
+    set_path = Path(args.set)
+    if not set_path.is_absolute():
+        set_path = ROOT / set_path
+    out_path = Path(args.out)
+    if not out_path.is_absolute():
+        out_path = ROOT / out_path
+
+    # Fast path: print the committed artifact when it already exists and an
+    # explicit regeneration was not requested.
+    if not args.measure and out_path.exists():
+        if not out_path.exists():
+            print(f"no committed result at {out_path.relative_to(ROOT) if out_path.is_relative_to(ROOT) else out_path} "
+                  f"-- run with --measure first", file=sys.stderr)
             return 2
-        payload = json.loads(RESULTS.read_text(encoding="utf-8"))
+        payload = json.loads(out_path.read_text(encoding="utf-8"))
         print(f"model: {payload.get('model')}")
         print("(printed from the committed run; pass --measure to regenerate)")
         print()
         print_table(payload)
         return 0
 
+    precisions = [p.strip() for p in args.precisions.split(",") if p.strip()]
+    if len(precisions) < 2:
+        print("--precisions must contain at least a baseline and one candidate",
+              file=sys.stderr)
+        return 2
+
     started = time.time()
     print(f"model: {MODEL}")
-    print(f"cases: {len(ANSWERS)} · precisions: fp32, int8 · max_new_tokens: {MAX_NEW_TOKENS}")
+    es = EvalSet.load(set_path)
+    if args.max_cases is not None and args.max_cases < len(es):
+        es = EvalSet(list(es)[: args.max_cases])
+    print(f"cases: {len(es)} · precisions: {', '.join(precisions)} · max_new_tokens: {MAX_NEW_TOKENS}")
 
     factory = build_model_factory(MODEL, max_new_tokens=MAX_NEW_TOKENS)
     harness = QuantHarness(
         model_factory=factory, max_new_tokens=MAX_NEW_TOKENS,
-        scorer=numeral,          # see numeral(): exact-string matching measured verbosity
+        scorer=numeral,
     )
-    es = build_eval_set()
 
-    # min_accuracy=0.5: a model that cannot do the task at baseline must not produce a
-    # green build just because quantization changed nothing. That is what 1.0.3 added.
     res = harness.compare(
         es,
-        baseline_precision="fp32",
-        candidate_precisions=["int8"],
+        baseline_precision=precisions[0],
+        candidate_precisions=precisions[1:],
         max_drop_points=2.0,
-        min_accuracy=0.5,
+        min_accuracy=args.min_accuracy,
     )
 
     payload = res.to_dict()
     payload["model"] = MODEL
-    payload["task"] = "20 single-answer arithmetic word problems, scored on the numeral produced"
+    try:
+        payload["eval"] = str(set_path.relative_to(ROOT))
+    except ValueError:
+        payload["eval"] = str(set_path)
+    payload["points_per_case"] = round(100 / len(es), 3)
     payload["max_new_tokens"] = MAX_NEW_TOKENS
     payload["wall_seconds"] = round(time.time() - started, 1)
-    RESULTS.parent.mkdir(parents=True, exist_ok=True)
-    RESULTS.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     print_table(payload)
-    if payload["baseline"]["accuracy"] < 0.5:
-        print("NOTE: the baseline itself is below the 0.5 floor — read this as 'this model "
+    if args.min_accuracy is not None and payload["baseline"]["accuracy"] < args.min_accuracy:
+        print("NOTE: the baseline itself is below the --min-accuracy floor -- read this as 'this model "
               "cannot do the task', not as a pass on quality.")
-    print(f"\nwrote {RESULTS.relative_to(ROOT)} in {payload['wall_seconds']}s")
+    print(f"\nwrote {out_path.relative_to(ROOT) if out_path.is_relative_to(ROOT) else out_path} in {payload['wall_seconds']}s")
     return 0
 
 

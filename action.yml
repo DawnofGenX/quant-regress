@@ -71,7 +71,10 @@ inputs:
     description: "Optional HF cache directory."
     required: false
     default: ""
-
+  response-cache:
+    description: "Directory to cache raw generations per precision, so a rerun after a transient failure does not redo generation."
+    required: false
+    default: ""
 runs:
   using: "docker"
   image: "Dockerfile"
@@ -109,3 +112,5 @@ runs:
     - ${{ inputs.hf-token }}
     - --cache-dir
     - ${{ inputs.cache-dir }}
+    - --response-cache
+    - ${{ inputs.response-cache }}

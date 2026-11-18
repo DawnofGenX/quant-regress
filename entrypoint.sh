@@ -20,11 +20,12 @@ JUNIT_PATH=""
 REPORT="quant-regress-report.json"
 HF_TOKEN_INPUT=""
 CACHE_DIR=""
+RESPONSE_CACHE=""
 
 while [ $# -gt 0 ]; do
   flag="$1"
   case "$flag" in
-    --eval|--model|--precisions|--baseline-precision|--max-drop-points|--min-accuracy|--max-new-tokens|--scorer|--system-prompt|--labels|--output-format|--junit-path|--report|--hf-token|--cache-dir)
+    --eval|--model|--precisions|--baseline-precision|--max-drop-points|--min-accuracy|--max-new-tokens|--scorer|--system-prompt|--labels|--output-format|--junit-path|--report|--hf-token|--cache-dir|--response-cache)
       shift
       [ $# -gt 0 ] || { echo "::error::missing value for $flag"; exit 2; }
       case "$flag" in
@@ -43,6 +44,7 @@ while [ $# -gt 0 ]; do
         --report) REPORT="$1" ;;
         --hf-token) HF_TOKEN_INPUT="$1" ;;
         --cache-dir) CACHE_DIR="$1" ;;
+        --response-cache) RESPONSE_CACHE="$1" ;;
       esac
       shift
       ;;
@@ -90,6 +92,10 @@ fi
 
 if [ -n "$CACHE_DIR" ]; then
   set -- "$@" --cache-dir "$CACHE_DIR"
+fi
+
+if [ -n "$RESPONSE_CACHE" ]; then
+  set -- "$@" --response-cache "$RESPONSE_CACHE"
 fi
 
 # Forwarded only when set, for the same reason as the floor: an empty value

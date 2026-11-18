@@ -201,3 +201,34 @@ def test_committed_results_are_exactly_what_a_fresh_run_produces():
         + " — re-run the script and commit it, so the artifact matches the code"
     )
 
+
+
+def test_results_eval_paths_resolve_when_present():
+    import json as _json
+    results_dir = ROOT / "results"
+    if not results_dir.is_dir():
+        pytest.skip("no results/ directory")
+    for path in results_dir.glob("*.json"):
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict) or "eval" not in data:
+            continue
+        eval_rel = data["eval"]
+        assert (ROOT / eval_rel).exists(), (
+            f"{path.relative_to(ROOT)} declares eval={eval_rel!r} but that path "
+            f"does not exist on disk"
+        )
+
+
+def test_regen_real_model_help_lists_new_flags():
+    import json as _json  # noqa: F401
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPTS / "regen_real_model.py"), "--help"],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout + proc.stderr
+    for flag in ("--set", "--precisions", "--out"):
+        assert flag in out, f"{flag} missing from --help output"
