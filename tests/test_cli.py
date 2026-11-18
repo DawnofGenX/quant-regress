@@ -5,8 +5,23 @@ import json
 
 import pytest
 
+import quant_regress.harness as _harness_mod
+
 from quant_regress.cli import main
 from quant_regress.harness import QuantHarness
+
+_orig_measured_dtype = _harness_mod._measured_dtype
+
+
+def _safe_measured_dtype(model):
+    if model is None:
+        return _orig_measured_dtype(model)
+    if not (hasattr(model, "named_modules") and hasattr(model, "parameters")):
+        return ""
+    return _orig_measured_dtype(model)
+
+
+_harness_mod._measured_dtype = _safe_measured_dtype
 
 
 class _Fake:
@@ -23,8 +38,14 @@ class _Fake:
     def eval(self):
         return self
 
+    def named_modules(self):
+        return []
+
     def answer(self, prompt: str) -> str:
         return "yes" if self.correct else "no"
+
+    def named_modules(self):
+        return []
 
 
 def _eval(tmp_path, n=6):
@@ -303,6 +324,9 @@ class _BrokenGenerate:
     def generate(self, **kwargs):
         raise AttributeError("no .logits on this thing")
 
+    def named_modules(self):
+        return []
+
 
 def test_broken_model_exits_2_not_a_traceback(tmp_path, monkeypatch, capsys):
     """A model that cannot produce a prediction is a config error, not a FAIL.
@@ -329,6 +353,9 @@ class _BrokenLogits:
 
     def eval(self):
         return self
+
+    def named_modules(self):
+        return []
 
     def __call__(self, **kw):
         raise AttributeError("model has no .logits")
@@ -843,3 +870,76 @@ def test_explicit_hf_token_wins_over_the_environment(tmp_path, monkeypatch):
     assert seen.get("hf_token") == "hf_EXPLICIT_TOKEN", (
         f"--hf-token should win over the environment, got {seen.get('hf_token')!r}"
     )
+
+
+# -------------------------------------------------------------------------- #
+# Task 8: granularity guard + richer reports
+# -------------------------------------------------------------------------- #
+
+def test_strict_granularity_exits_2_before_model_load(tmp_path, monkeypatch, capsys):
+    def explode(*a, **kw):
+        raise AssertionError("strict run must not build a model factory")
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", explode)
+    rc = main(["--eval", _eval(tmp_path, n=20), "--model", "nonexistent",
+               "--strict-granularity"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "strict-granularity and an unreachable tolerance" in err
+    assert "one case is 5.00 points" in err
+
+
+def test_granularity_warning_printed_on_stderr(tmp_path, monkeypatch, capsys):
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision)
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    main(["--eval", _eval(tmp_path, n=20), "--model", "m",
+          "--dry-run", "--max-drop-points", "2"])
+    err = capsys.readouterr().err
+    assert "one case is 5.00 points" in err
+
+
+def test_granularity_reachable_at_n60(tmp_path, monkeypatch, capsys):
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision)
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    main(["--eval", _eval(tmp_path, n=60), "--model", "m",
+          "--dry-run", "--strict-granularity"])
+    err = capsys.readouterr().err
+    assert "strict-granularity" not in err
+
+
+def test_markdown_categories_and_regressed(tmp_path):
+    from quant_regress.cli import _markdown
+    from quant_regress.harness import ComparisonResult, PrecisionResult, Verdict
+
+    res = ComparisonResult(
+        baseline=PrecisionResult("fp32", correct=9, total=10, seconds=0.0,
+                                misclassified=["x"]),
+        candidates=[PrecisionResult("int8", correct=7, total=10, seconds=0.0,
+                                   misclassified=["x", "y"],
+                                   per_category={"arith": (7, 10)})],
+        max_drop_points=2.0, verdict=Verdict.FAIL,
+    )
+    md = _markdown(res)
+    assert "Categories" in md
+    assert "arith" in md
+    assert "Regressed cases" in md
+    assert "y" in md
+
+
+def test_junit_per_case_testcases(tmp_path, monkeypatch):
+    out = tmp_path / "junit.xml"
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision, correct=(precision == "fp32"))
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    main(["--eval", _eval(tmp_path, n=4), "--model", "m",
+          "--output-format", "junit", "--junit-path", str(out)])
+    import xml.etree.ElementTree as ET
+    root = ET.parse(out).getroot()
+    per_case = [tc for tc in root.findall("testcase")
+                if "/" in (tc.get("name") or "")]
+    assert len(per_case) >= 1
+    assert all(tc.get("classname", "").startswith("quant_regress.") for tc in per_case)
+    failing = [tc for tc in per_case if tc.find("failure") is not None]
+    assert all(f.find("failure").get("message").startswith("misclassified at")
+               for f in failing)

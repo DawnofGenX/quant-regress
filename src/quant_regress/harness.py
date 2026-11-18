@@ -17,7 +17,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Sequence, cast
 
 from .evalset import EvalSet, Case, normalise
 
@@ -297,7 +297,7 @@ def _measured_dtype(model) -> str:
     if model is None:
         return ""
     named_modules = getattr(model, "named_modules", None)
-    walk: Iterable = named_modules() if callable(named_modules) else ()
+    walk = cast(Iterable, named_modules() if callable(named_modules) else ())
     for _, mod in walk:
         # A dynamically quantized Linear keeps its dtype on the packed params;
         # its ``weight`` is a bound method that dequantizes to float32, so
@@ -312,7 +312,7 @@ def _measured_dtype(model) -> str:
         if type(mod).__name__.endswith("Linear"):
             return str(weight.dtype)
     parameters = getattr(model, "parameters", None)
-    params_iter: Iterable = parameters() if callable(parameters) else ()
+    params_iter = cast(Iterable, parameters() if callable(parameters) else ())
     params = [
         p for p in params_iter if hasattr(p, "dtype")
     ]
