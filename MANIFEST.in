@@ -1,0 +1,11 @@
+# The README makes claims that are checked by the test suite, and the tests need
+# the eval sets, the regenerating scripts and the committed artefacts to check
+# them. setuptools' default templates ship tests/test*.py but none of those, so a
+# source install got a suite that failed on import-time file lookups. Ship the
+# three directories the tests read.
+include README.md CHANGELOG.md LICENSE
+recursive-include src/quant_regress *.py
+recursive-include tests *.py
+recursive-include scripts *.py
+recursive-include evals *.jsonl
+recursive-include results *.json
