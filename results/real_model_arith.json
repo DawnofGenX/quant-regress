@@ -4,7 +4,7 @@
     "accuracy": 0.3333,
     "correct": 20,
     "total": 60,
-    "seconds": 21.516,
+    "seconds": 410.816,
     "misclassified": [
       "arith-e03",
       "arith-e05",
@@ -73,7 +73,7 @@
       "accuracy": 0.0333,
       "correct": 2,
       "total": 60,
-      "seconds": 78.69,
+      "seconds": 296.294,
       "drop_points": 30.0,
       "misclassified": [
         "arith-e01",
@@ -177,14 +177,19 @@
       ],
       "recovered": [
         "arith-h03"
-      ]
+      ],
+      "drop_ci_95": [
+        18.333,
+        43.333
+      ],
+      "drop_significant": true
     },
     {
       "precision": "bf16",
       "accuracy": 0.3333,
       "correct": 20,
       "total": 60,
-      "seconds": 13.182,
+      "seconds": 21.854,
       "drop_points": 0.0,
       "misclassified": [
         "arith-e03",
@@ -248,7 +253,12 @@
         }
       },
       "regressed": [],
-      "recovered": []
+      "recovered": [],
+      "drop_ci_95": [
+        0.0,
+        0.0
+      ],
+      "drop_significant": false
     }
   ],
   "worst_drop_points": 30.0,
@@ -259,10 +269,18 @@
   "points_per_case": 1.667,
   "tolerance_reachable": true,
   "granularity_warning": null,
+  "statistics": {
+    "method": "paired percentile bootstrap",
+    "resamples": 10000,
+    "alpha": 0.05,
+    "seed": 0
+  },
+  "require_significance": false,
+  "significance_note": null,
   "verdict": "fail",
   "model": "Qwen/Qwen2.5-0.5B-Instruct",
   "eval": "evals/sets/arith-tiered.jsonl",
   "max_new_tokens": 32,
   "scorer": "numeral (last number in the completion)",
-  "wall_seconds": 135.3
+  "wall_seconds": 838.2
 }

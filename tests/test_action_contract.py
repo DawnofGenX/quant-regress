@@ -36,6 +36,8 @@ ACTION_ARGS = [
     "--report", "quant-regress-report.json",
     "--hf-token", "",
     "--cache-dir", "",
+    "--summary-file", "auto",
+    "--require-significance", "false",
 ]
 
 
@@ -454,3 +456,81 @@ def test_response_cache_whitelist_and_forwarded():
     # final set -- construction
     assert any("--response-cache" in ln and 'set -- "$@"' in ln
                for ln in entrypoint.splitlines())
+
+
+def test_summary_file_input_declared_with_auto_default():
+    import yaml
+
+    action = yaml.safe_load((ROOT / "action.yml").read_text(encoding="utf-8"))
+    inputs = action["inputs"]
+    assert "summary-file" in inputs
+    assert inputs["summary-file"].get("required", True) is False
+    assert inputs["summary-file"].get("default") == "auto"
+
+
+def test_summary_file_whitelist_and_forwarded():
+    entrypoint = ENTRYPOINT.read_text(encoding="utf-8")
+    whitelist_lines = [ln for ln in entrypoint.splitlines()
+                      if "--summary-file" in ln and "|" in ln]
+    assert whitelist_lines, "no whitelist line contains --summary-file"
+    assert any("--summary-file" in ln and 'set -- "$@"' in ln
+               for ln in entrypoint.splitlines())
+
+
+def test_summary_file_empty_is_dropped_end_to_end(tmp_path):
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    rc, argv = _run_entrypoint(
+        [*ACTION_ARGS, "--summary-file", ""], empty_dir,
+    )
+    assert rc == 0, argv
+    assert "--summary-file" not in argv, (
+        f"an empty summary-file must be dropped, not forwarded: {argv}"
+    )
+
+
+def test_summary_file_auto_reaches_the_cli_end_to_end(tmp_path):
+    rc, argv = _run_entrypoint(ACTION_ARGS, tmp_path)
+    assert rc == 0, argv
+    pairs = dict(zip(argv[2::2], argv[3::2])) if len(argv) > 2 else {}
+    assert pairs.get("--summary-file") == "auto", (
+        f"--summary-file auto must be forwarded by default: {argv}"
+    )
+
+def test_require_significance_input_declared_with_false_default():
+    import yaml
+
+    action = yaml.safe_load((ROOT / "action.yml").read_text(encoding="utf-8"))
+    inputs = action["inputs"]
+    assert "require-significance" in inputs
+    assert inputs["require-significance"].get("required", True) is False
+    assert inputs["require-significance"].get("default") == "false"
+
+
+def test_require_significance_true_is_forwarded_as_a_bare_flag(tmp_path):
+    """A boolean input must not be forwarded as `--flag true`.
+
+    The CLI flag takes no value, so a literal "true" would arrive as a
+    positional argument and every run would exit 2.
+    """
+    argv_in = [*ACTION_ARGS[:-1], "true"]
+    rc, argv = _run_entrypoint(argv_in, tmp_path)
+    assert rc == 0, argv
+    assert "--require-significance" in argv, argv
+    assert argv.count("--require-significance") == 1, argv
+    assert "true" not in argv, f"the value leaked through as a positional: {argv}"
+
+
+def test_require_significance_false_is_not_forwarded(tmp_path):
+    rc, argv = _run_entrypoint(ACTION_ARGS, tmp_path)
+    assert rc == 0, argv
+    assert "--require-significance" not in argv, (
+        f"false must leave the gate on the point estimate: {argv}"
+    )
+
+
+def test_require_significance_rejects_a_non_boolean(tmp_path):
+    """A typo must not silently disable or enable the significance gate."""
+    argv_in = [*ACTION_ARGS[:-1], "yes-please"]
+    rc, argv = _run_entrypoint(argv_in, tmp_path)
+    assert rc == 2, f"expected exit 2 for a non-boolean value, got {rc}: {argv}"

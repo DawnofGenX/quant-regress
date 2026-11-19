@@ -21,6 +21,8 @@ from typing import Callable, Iterable, Sequence, cast
 
 from .evalset import EvalSet, Case, normalise
 
+from .stats import paired_bootstrap_drop_ci
+
 from .adapter import SUPPORTED as SUPPORTED_PRECISIONS
 
 
@@ -139,6 +141,12 @@ class ComparisonResult:
     points_per_case: float = 0.0
     tolerance_reachable: bool = True
     granularity_warning: str | None = None
+    #: Paired bootstrap CI on the accuracy drop, keyed by candidate precision.
+    drop_ci: dict[str, tuple[float, float]] = field(default_factory=dict)
+    #: When True, a drop that is not statistically significant does not FAIL.
+    require_significance: bool = False
+    #: Human-readable note about significance (PASS explanation or caveat).
+    significance_note: str | None = None
 
     def regressed_ids(self, c: PrecisionResult) -> list[str]:
         base_wrong = set(self.baseline.misclassified)
@@ -162,6 +170,24 @@ class ComparisonResult:
             (self.baseline.accuracy - c.accuracy) * 100.0 for c in self.candidates
         ]
         return max(drops) if drops else 0.0
+
+    def drop_ci_for(self, c: PrecisionResult) -> tuple[float, float] | None:
+        return self.drop_ci.get(c.precision)
+
+    def significant_drop(self, c: PrecisionResult) -> bool:
+        iv = self.drop_ci_for(c)
+        if iv is None:
+            return False
+        return iv[0] > 0
+
+    @property
+    def statistics(self) -> dict:
+        return {
+            "method": "paired percentile bootstrap",
+            "resamples": 10000,
+            "alpha": 0.05,
+            "seed": 0,
+        }
 
     def to_dict(self) -> dict:
         return {
@@ -202,6 +228,11 @@ class ComparisonResult:
                     },
                     "regressed": self.regressed_ids(c),
                     "recovered": self.recovered_ids(c),
+                    "drop_ci_95": [
+                        round(self.drop_ci_for(c)[0], 3) if self.drop_ci_for(c) is not None else 0.0,
+                        round(self.drop_ci_for(c)[1], 3) if self.drop_ci_for(c) is not None else 0.0,
+                    ],
+                    "drop_significant": self.significant_drop(c),
                 }
                 for c in self.candidates
             ],
@@ -213,6 +244,9 @@ class ComparisonResult:
             "points_per_case": self.points_per_case,
             "tolerance_reachable": self.tolerance_reachable,
             "granularity_warning": self.granularity_warning,
+            "statistics": self.statistics,
+            "require_significance": self.require_significance,
+            "significance_note": self.significance_note,
             "verdict": self.verdict.value,
         }
 
@@ -375,6 +409,8 @@ class QuantHarness:
         candidate_precisions: Sequence[str] = ("int8",),
         max_drop_points: float = 2.0,
         min_accuracy: float | None = None,
+        *,
+        require_significance: bool = False,
     ) -> ComparisonResult:
         """Measure every precision and decide whether the build should pass.
 
@@ -430,6 +466,17 @@ class QuantHarness:
                     f"{len(eval_set)} cases"
                 )
 
+        cases = list(eval_set)
+        baseline_wrong = set(baseline.misclassified)
+        baseline_hits = [0 if c.id in baseline_wrong else 1 for c in cases]
+        drop_ci: dict[str, tuple[float, float]] = {}
+        for cand in candidates:
+            cand_wrong = set(cand.misclassified)
+            cand_hits = [0 if c.id in cand_wrong else 1 for c in cases]
+            drop_ci[cand.precision] = paired_bootstrap_drop_ci(
+                baseline_hits, cand_hits, resamples=10000, alpha=0.05, seed=0
+            )
+
         points_per_case = 100.0 / len(eval_set)
         tolerance_reachable = (
             max_drop_points == 0.0
@@ -463,18 +510,79 @@ class QuantHarness:
                 f"cannot answer would otherwise PASS with a 0.00-point drop."
             )
 
+        # Significance handling.
+        over_tol = [
+            c for c in candidates
+            if (baseline.accuracy - c.accuracy) * 100.0 > max_drop_points
+        ]
+        all_over_not_sig = bool(over_tol) and all(
+            not (drop_ci.get(c.precision, (0.0, 0.0))[0] > 0) for c in over_tol
+        )
+
+        # Triggering candidate = worst drop.
+        worst_cand = None
+        if candidates:
+            worst_cand = max(
+                candidates, key=lambda c: (baseline.accuracy - c.accuracy) * 100.0
+            )
+
+        flipped = (
+            require_significance
+            and floor_failure is None
+            and bool(over_tol)
+            and all_over_not_sig
+        )
+
+        if floor_failure is not None:
+            verdict = Verdict.FAIL
+        elif worst > max_drop_points:
+            if flipped:
+                verdict = Verdict.PASS
+            else:
+                verdict = Verdict.FAIL
+        else:
+            verdict = Verdict.PASS
+
+        significance_note: str | None = None
+        if flipped:
+            assert worst_cand is not None
+            c = worst_cand
+            iv = drop_ci[c.precision]
+            drop_val = (baseline.accuracy - c.accuracy) * 100.0
+            significance_note = (
+                f"the drop of {drop_val:.1f} points is inside the sampling "
+                f"noise: 95% CI {iv[0]:.1f} to {iv[1]:.1f} points for "
+                f"{c.precision}, so --require-significance reports PASS. "
+                f"Widen the eval set to resolve a smaller drop."
+            )
+        elif (
+            floor_failure is None
+            and worst > max_drop_points
+            and worst_cand is not None
+            and not (drop_ci.get(worst_cand.precision, (0.0, 0.0))[0] > 0)
+        ):
+            c = worst_cand
+            iv = drop_ci[c.precision]
+            drop_val = (baseline.accuracy - c.accuracy) * 100.0
+            significance_note = (
+                f"note: the drop of {drop_val:.1f} points is inside the "
+                f"sampling noise: 95% CI {iv[0]:.1f} to {iv[1]:.1f} points "
+                f"for {c.precision}. Widen the eval set to resolve a smaller drop."
+            )
+
         return ComparisonResult(
             baseline=baseline,
             candidates=candidates,
             max_drop_points=max_drop_points,
-            verdict=Verdict.FAIL
-            if worst > max_drop_points or floor_failure
-            else Verdict.PASS,
+            verdict=verdict,
             min_accuracy=min_accuracy,
             floor_failure=floor_failure,
             points_per_case=points_per_case,
             tolerance_reachable=tolerance_reachable,
             granularity_warning=granularity_warning,
+            drop_ci=drop_ci,
+            require_significance=require_significance,
+            significance_note=significance_note,
         )
 
     # -- internals --------------------------------------------------------

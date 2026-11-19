@@ -1147,3 +1147,93 @@ def test_exit_code_constants_pin_the_ci_contract():
     assert EXIT_OK == 0
     assert EXIT_REGRESSION == 1
     assert EXIT_USAGE == 2
+
+
+# --------------------------------------------------------------------------
+# Phase 5 -- paired bootstrap CI on the accuracy drop (1.3.0).
+# --------------------------------------------------------------------------
+
+
+def test_comparison_exposes_drop_ci_for_each_candidate(tmp_path):
+    es = _eval(tmp_path, n=6)
+    h = QuantHarness(model_factory=lambda precision: _FakeModel(precision))
+    res = h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"])
+    assert set(res.drop_ci.keys()) == {"int8"}
+    c = res.candidates[0]
+    assert res.drop_ci_for(c) == res.drop_ci["int8"]
+    assert res.drop_ci_for(c) is not None
+
+
+def test_identical_arms_yield_zero_interval_and_not_significant(tmp_path):
+    es = _eval(tmp_path, n=6)
+    h = QuantHarness(model_factory=lambda precision: _FakeModel(precision, correct=True))
+    res = h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"])
+    c = res.candidates[0]
+    assert res.drop_ci_for(c) == (0.0, 0.0)
+    assert res.significant_drop(c) is False
+
+
+def test_fabricated_collapse_yields_significant_drop(tmp_path):
+    es = _eval(tmp_path, n=10)
+    h = QuantHarness(model_factory=lambda precision: _FakeModel(precision, correct=(precision == "fp32")))
+    res = h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"])
+    c = res.candidates[0]
+    assert res.significant_drop(c) is True
+
+
+def test_require_significance_flips_over_tolerance_noise_drop(tmp_path):
+    es = _eval(tmp_path, n=100)
+
+    class _Baseline:
+        def __init__(self, precision):
+            self.precision = precision
+
+        def eval(self):
+            return self
+
+        def answer(self, prompt):
+            return "yes"
+
+    class _Candidate:
+        def __init__(self, precision):
+            self.precision = precision
+
+        def eval(self):
+            return self
+
+        def answer(self, prompt):
+            return "no" if prompt == "q0?" else "yes"
+
+    def factory(precision):
+        if precision == "fp32":
+            return _Baseline(precision)
+        return _Candidate(precision)
+
+    h = QuantHarness(model_factory=factory)
+    default = h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"],
+                        max_drop_points=0.0)
+    assert default.verdict is Verdict.FAIL
+
+    sig = h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"],
+                    max_drop_points=0.0, require_significance=True)
+    assert sig.verdict is Verdict.PASS
+    assert sig.significance_note is not None
+    assert sig.require_significance is True
+
+
+def test_to_dict_carries_drop_ci_and_stats_fields(tmp_path):
+    es = _eval(tmp_path, n=6)
+    h = QuantHarness(model_factory=lambda precision: _FakeModel(precision))
+    res = h.compare(es, baseline_precision="fp32", candidate_precisions=["int8"],
+                    require_significance=True)
+    d = res.to_dict()
+    assert "drop_ci_95" in d["candidates"][0]
+    assert "drop_significant" in d["candidates"][0]
+    assert d["statistics"] == {
+        "method": "paired percentile bootstrap",
+        "resamples": 10000,
+        "alpha": 0.05,
+        "seed": 0,
+    }
+    assert d["require_significance"] is True
+    assert "significance_note" in d

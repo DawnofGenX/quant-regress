@@ -21,11 +21,13 @@ REPORT="quant-regress-report.json"
 HF_TOKEN_INPUT=""
 CACHE_DIR=""
 RESPONSE_CACHE=""
+SUMMARY_FILE="auto"
+REQUIRE_SIGNIFICANCE="false"
 
 while [ $# -gt 0 ]; do
   flag="$1"
   case "$flag" in
-    --eval|--model|--precisions|--baseline-precision|--max-drop-points|--min-accuracy|--max-new-tokens|--scorer|--system-prompt|--labels|--output-format|--junit-path|--report|--hf-token|--cache-dir|--response-cache)
+    --eval|--model|--precisions|--baseline-precision|--max-drop-points|--min-accuracy|--max-new-tokens|--scorer|--system-prompt|--labels|--output-format|--junit-path|--report|--hf-token|--cache-dir|--response-cache|--summary-file|--require-significance)
       shift
       [ $# -gt 0 ] || { echo "::error::missing value for $flag"; exit 2; }
       case "$flag" in
@@ -45,6 +47,8 @@ while [ $# -gt 0 ]; do
         --hf-token) HF_TOKEN_INPUT="$1" ;;
         --cache-dir) CACHE_DIR="$1" ;;
         --response-cache) RESPONSE_CACHE="$1" ;;
+        --summary-file) SUMMARY_FILE="$1" ;;
+        --require-significance) REQUIRE_SIGNIFICANCE="$1" ;;
       esac
       shift
       ;;
@@ -97,6 +101,26 @@ fi
 if [ -n "$RESPONSE_CACHE" ]; then
   set -- "$@" --response-cache "$RESPONSE_CACHE"
 fi
+
+# Forwarded only when non-empty: an empty value is "skip" per the CLI contract,
+# and `auto` (the default) is non-empty and must reach the CLI.
+if [ -n "$SUMMARY_FILE" ]; then
+  set -- "$@" --summary-file "$SUMMARY_FILE"
+fi
+
+# A boolean input cannot be forwarded as `--flag value`: the CLI flag takes no
+# value, so "false" would be read as a positional argument. Translate the string
+# here, and refuse anything that is not a boolean rather than silently treating
+# a typo as "off" -- a gate that quietly disables itself is worse than one that
+# fails loudly.
+case "$REQUIRE_SIGNIFICANCE" in
+  true|TRUE|True|1) set -- "$@" --require-significance ;;
+  false|FALSE|False|0|"") : ;;
+  *)
+    echo "::error::require-significance must be true or false, got '$REQUIRE_SIGNIFICANCE'"
+    exit 2
+    ;;
+esac
 
 # Forwarded only when set, for the same reason as the floor: an empty value
 # must not become the literal JUnit filename (the CLI falls back to a

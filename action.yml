@@ -75,6 +75,19 @@ inputs:
     description: "Directory to cache raw generations per precision, so a rerun after a transient failure does not redo generation."
     required: false
     default: ""
+  summary-file:
+    description: >-
+      Appends the comparison table to the GitHub step summary. `auto` means
+      `$GITHUB_STEP_SUMMARY`.
+    required: false
+    default: "auto"
+  require-significance:
+    description: >-
+      true enables --require-significance: a drop whose 95% confidence interval
+      includes zero is reported as PASS instead of FAIL. false (default) keeps
+      the gate on the point estimate.
+    required: false
+    default: "false"
 runs:
   using: "docker"
   image: "Dockerfile"
@@ -114,3 +127,7 @@ runs:
     - ${{ inputs.cache-dir }}
     - --response-cache
     - ${{ inputs.response-cache }}
+    - --summary-file
+    - ${{ inputs.summary-file }}
+    - --require-significance
+    - ${{ inputs.require-significance }}

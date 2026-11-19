@@ -617,13 +617,13 @@ def test_markdown_table_has_a_row_per_precision_with_drops():
         verdict=Verdict.FAIL,
     )
     lines = _markdown(res).splitlines()
-    assert lines[0] == "| precision | accuracy | correct | drop |"
-    assert lines[1] == "|---|---|---|---|"
+    assert lines[0] == "| precision | accuracy | correct | drop | 95% CI (pts) |"
+    assert lines[1] == "|---|---|---|---|---|"
     # One row per candidate, plus the baseline row, each carrying the real
     # numbers and a signed drop in points.
-    assert "| fp32 (baseline) | 90.0% | 9/10 | — |" in lines
-    assert "| int8 | 90.0% | 9/10 | +0.0 pts |" in lines
-    assert "| int4 | 40.0% | 4/10 | +50.0 pts |" in lines
+    assert "| fp32 (baseline) | 90.0% | 9/10 | — | — |" in lines
+    assert "| int8 | 90.0% | 9/10 | +0.0 pts | — |" in lines
+    assert "| int4 | 40.0% | 4/10 | +50.0 pts | — |" in lines
     assert len(lines) == 2 + 1 + len(res.candidates)
 
 
@@ -638,8 +638,8 @@ def test_text_output_reflects_the_run_in_stdout(tmp_path, monkeypatch, capsys):
                "--max-drop-points", "5"])
     out = capsys.readouterr().out
     assert rc == 1
-    assert "| fp32 (baseline) | 100.0% | 6/6 | — |" in out
-    assert "| int8 | 0.0% | 0/6 | +100.0 pts |" in out
+    assert "| fp32 (baseline) | 100.0% | 6/6 | — | — |" in out
+    assert "| int8 | 0.0% | 0/6 | +100.0 pts | 100.0 to 100.0 |" in out
     assert "worst drop: +100.00 pts" in out
 
 
@@ -943,3 +943,186 @@ def test_junit_per_case_testcases(tmp_path, monkeypatch):
     failing = [tc for tc in per_case if tc.find("failure") is not None]
     assert all(f.find("failure").get("message").startswith("misclassified at")
                for f in failing)
+
+# -------------------------------------------------------------------------- #
+# CI surface (1.3.0): confidence intervals, --require-significance, summary   #
+# -------------------------------------------------------------------------- #
+
+
+def test_text_report_emits_ci_line_per_candidate(tmp_path, monkeypatch, capsys):
+    from quant_regress.harness import ComparisonResult, PrecisionResult, Verdict
+
+    res = ComparisonResult(
+        baseline=PrecisionResult("fp32", correct=60, total=60, seconds=0.0),
+        candidates=[PrecisionResult("int8", correct=59, total=60, seconds=0.0)],
+        max_drop_points=2.0,
+        verdict=Verdict.FAIL,
+        drop_ci={"int8": (0.0, 5.0)},
+    )
+    monkeypatch.setattr(
+        "quant_regress.harness.QuantHarness.compare", lambda self, *a, **k: res
+    )
+    monkeypatch.setattr(
+        "quant_regress.cli.build_model_factory", lambda *a, **k: (lambda p: None)
+    )
+    rc = main(["--eval", _eval(tmp_path, n=60), "--model", "m"])
+    out = capsys.readouterr().out
+    assert "95% CI of the drop (int8): 0.0 to 5.0 points (n=60, 10000 resamples)" in out
+
+
+def test_require_significance_reaches_compare(tmp_path, monkeypatch):
+    captured = {}
+
+    def spy(self, eval_set, baseline_precision="fp32",
+            candidate_precisions=("int8",), **kw):
+        captured.update(kw)
+        raise SystemExit(0)
+
+    monkeypatch.setattr("quant_regress.harness.QuantHarness.compare", spy)
+    monkeypatch.setattr(
+        "quant_regress.cli.build_model_factory", lambda *a, **k: (lambda p: None)
+    )
+    with pytest.raises(SystemExit):
+        main(["--eval", _eval(tmp_path), "--model", "m", "--require-significance"])
+    assert captured.get("require_significance") is True
+
+
+def test_require_significance_note_line_printed(tmp_path, monkeypatch, capsys):
+    from quant_regress.harness import ComparisonResult, PrecisionResult, Verdict
+
+    res = ComparisonResult(
+        baseline=PrecisionResult("fp32", correct=60, total=60, seconds=0.0),
+        candidates=[PrecisionResult("int8", correct=59, total=60, seconds=0.0)],
+        max_drop_points=2.0,
+        verdict=Verdict.PASS,
+        require_significance=True,
+        significance_note="the drop is inside the sampling noise",
+        drop_ci={"int8": (0.0, 5.0)},
+    )
+    monkeypatch.setattr(
+        "quant_regress.harness.QuantHarness.compare", lambda self, *a, **k: res
+    )
+    monkeypatch.setattr(
+        "quant_regress.cli.build_model_factory", lambda *a, **k: (lambda p: None)
+    )
+    main(["--eval", _eval(tmp_path, n=60), "--model", "m", "--require-significance"])
+    out = capsys.readouterr().out
+    assert "note: the drop is inside the sampling noise" in out
+
+
+def test_markdown_contains_ci_column_and_bounds(tmp_path):
+    from quant_regress.cli import _markdown
+    from quant_regress.harness import ComparisonResult, PrecisionResult, Verdict
+
+    res = ComparisonResult(
+        baseline=PrecisionResult("fp32", correct=60, total=60, seconds=0.0),
+        candidates=[PrecisionResult("int8", correct=59, total=60, seconds=0.0)],
+        max_drop_points=2.0,
+        verdict=Verdict.FAIL,
+        drop_ci={"int8": (0.0, 5.0)},
+    )
+    md = _markdown(res)
+    assert "95% CI" in md
+    assert "0.0 to 5.0" in md
+
+
+def test_junit_contains_drop_ci_property(tmp_path, monkeypatch):
+    import xml.etree.ElementTree as ET
+    from quant_regress.harness import ComparisonResult, PrecisionResult, Verdict
+
+    res = ComparisonResult(
+        baseline=PrecisionResult("fp32", correct=60, total=60, seconds=0.0),
+        candidates=[
+            PrecisionResult("int8", correct=59, total=60, seconds=0.0,
+                            misclassified=["0"])
+        ],
+        max_drop_points=2.0,
+        verdict=Verdict.FAIL,
+        drop_ci={"int8": (0.0, 5.0)},
+    )
+    monkeypatch.setattr(
+        "quant_regress.harness.QuantHarness.compare", lambda self, *a, **k: res
+    )
+    monkeypatch.setattr(
+        "quant_regress.cli.build_model_factory", lambda *a, **k: (lambda p: None)
+    )
+    out = tmp_path / "junit.xml"
+    main(["--eval", _eval(tmp_path, n=60), "--model", "m",
+          "--output-format", "junit", "--junit-path", str(out)])
+    root = ET.parse(out).getroot()
+    props = root.find("properties")
+    assert props is not None
+    prop = props.find("property[@name='drop_ci_95_int8']")
+    assert prop is not None
+    assert prop.get("value") == "0.0 to 5.0"
+    per_case = [tc for tc in root.findall("testcase")
+                if tc.get("name") == "int8/0"]
+    assert len(per_case) == 1
+
+
+def test_summary_file_appends(tmp_path, monkeypatch):
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision, correct=(precision == "fp32"))
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    summary = tmp_path / "summary.md"
+    rc1 = main(["--eval", _eval(tmp_path, n=6), "--model", "m",
+                "--max-drop-points", "5", "--summary-file", str(summary)])
+    rc2 = main(["--eval", _eval(tmp_path, n=6), "--model", "m",
+                "--max-drop-points", "5", "--summary-file", str(summary)])
+    assert rc1 == 1 and rc2 == 1
+    content = summary.read_text(encoding="utf-8")
+    assert content.count("fp32 (baseline)") == 2
+
+
+def test_summary_file_auto_env(tmp_path, monkeypatch):
+    target = tmp_path / "gh.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(target))
+
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision, correct=True)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path, n=6), "--model", "m",
+               "--summary-file", "auto"])
+    assert rc == 0
+    assert target.exists()
+    assert "fp32 (baseline)" in target.read_text(encoding="utf-8")
+
+
+def test_summary_file_auto_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision, correct=True)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path, n=6), "--model", "m",
+               "--summary-file", "auto"])
+    assert rc == 0
+
+
+def test_summary_file_empty_string_writes_nothing(tmp_path, monkeypatch):
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision, correct=True)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path, n=6), "--model", "m",
+               "--summary-file", ""])
+    assert rc == 0
+
+
+def test_summary_file_unwritable_prints_warning(tmp_path, monkeypatch, capsys):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    target = blocker / "summary.md"
+
+    def factory(*a, **kw):
+        return lambda precision: _Fake(precision, correct=True)
+
+    monkeypatch.setattr("quant_regress.cli.build_model_factory", factory)
+    rc = main(["--eval", _eval(tmp_path, n=6), "--model", "m",
+               "--summary-file", str(target)])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "warning: could not write step summary to" in err

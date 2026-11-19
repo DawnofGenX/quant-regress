@@ -4,7 +4,7 @@
     "accuracy": 0.9833,
     "correct": 59,
     "total": 60,
-    "seconds": 15.664,
+    "seconds": 26.93,
     "misclassified": [
       "cls-022"
     ],
@@ -22,7 +22,7 @@
       "accuracy": 0.0333,
       "correct": 2,
       "total": 60,
-      "seconds": 87.276,
+      "seconds": 98.508,
       "drop_points": 95.0,
       "misclassified": [
         "cls-001",
@@ -150,7 +150,12 @@
         "cls-059",
         "cls-060"
       ],
-      "recovered": []
+      "recovered": [],
+      "drop_ci_95": [
+        88.333,
+        100.0
+      ],
+      "drop_significant": true
     }
   ],
   "worst_drop_points": 95.0,
@@ -161,10 +166,18 @@
   "points_per_case": 1.667,
   "tolerance_reachable": true,
   "granularity_warning": null,
+  "statistics": {
+    "method": "paired percentile bootstrap",
+    "resamples": 10000,
+    "alpha": 0.05,
+    "seed": 0
+  },
+  "require_significance": false,
+  "significance_note": null,
   "verdict": "fail",
   "model": "Qwen/Qwen2.5-0.5B-Instruct",
   "eval": "evals/sets/classify.jsonl",
   "max_new_tokens": 32,
   "scorer": "default (exact match + declared aliases)",
-  "wall_seconds": 122.1
+  "wall_seconds": 158.4
 }
