@@ -21,11 +21,12 @@ REPORT="quant-regress-report.json"
 HF_TOKEN_INPUT=""
 CACHE_DIR=""
 RESPONSE_CACHE=""
+SUMMARY_FILE="auto"
 
 while [ $# -gt 0 ]; do
   flag="$1"
   case "$flag" in
-    --eval|--model|--precisions|--baseline-precision|--max-drop-points|--min-accuracy|--max-new-tokens|--scorer|--system-prompt|--labels|--output-format|--junit-path|--report|--hf-token|--cache-dir|--response-cache)
+    --eval|--model|--precisions|--baseline-precision|--max-drop-points|--min-accuracy|--max-new-tokens|--scorer|--system-prompt|--labels|--output-format|--junit-path|--report|--hf-token|--cache-dir|--response-cache|--summary-file)
       shift
       [ $# -gt 0 ] || { echo "::error::missing value for $flag"; exit 2; }
       case "$flag" in
@@ -45,6 +46,7 @@ while [ $# -gt 0 ]; do
         --hf-token) HF_TOKEN_INPUT="$1" ;;
         --cache-dir) CACHE_DIR="$1" ;;
         --response-cache) RESPONSE_CACHE="$1" ;;
+        --summary-file) SUMMARY_FILE="$1" ;;
       esac
       shift
       ;;
@@ -96,6 +98,12 @@ fi
 
 if [ -n "$RESPONSE_CACHE" ]; then
   set -- "$@" --response-cache "$RESPONSE_CACHE"
+fi
+
+# Forwarded only when non-empty: an empty value is "skip" per the CLI contract,
+# and `auto` (the default) is non-empty and must reach the CLI.
+if [ -n "$SUMMARY_FILE" ]; then
+  set -- "$@" --summary-file "$SUMMARY_FILE"
 fi
 
 # Forwarded only when set, for the same reason as the floor: an empty value
