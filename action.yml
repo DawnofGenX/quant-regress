@@ -81,6 +81,13 @@ inputs:
       `$GITHUB_STEP_SUMMARY`.
     required: false
     default: "auto"
+  require-significance:
+    description: >-
+      true enables --require-significance: a drop whose 95% confidence interval
+      includes zero is reported as PASS instead of FAIL. false (default) keeps
+      the gate on the point estimate.
+    required: false
+    default: "false"
 runs:
   using: "docker"
   image: "Dockerfile"
@@ -122,3 +129,5 @@ runs:
     - ${{ inputs.response-cache }}
     - --summary-file
     - ${{ inputs.summary-file }}
+    - --require-significance
+    - ${{ inputs.require-significance }}

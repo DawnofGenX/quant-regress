@@ -119,6 +119,8 @@ As a GitHub Action:
     model: meta-llama/Llama-3.2-1B-Instruct
     max-drop-points: 2
     min-accuracy: 0.5      # optional; see "Change is not quality" below
+    summary-file: auto     # optional; appends the table to the step summary
+    require-significance: false  # optional; PASS a drop whose CI includes zero
 ```
 
 `@v1` is a moving tag — it tracks the current release line, and has been re-pointed at least four
