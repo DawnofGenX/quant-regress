@@ -73,7 +73,12 @@
         "collapse-019",
         "collapse-020"
       ],
-      "recovered": []
+      "recovered": [],
+      "drop_ci_95": [
+        100.0,
+        100.0
+      ],
+      "drop_significant": true
     }
   ],
   "worst_drop_points": 100.0,
@@ -84,5 +89,13 @@
   "points_per_case": 5.0,
   "tolerance_reachable": false,
   "granularity_warning": "tolerance is finer than the eval set can express: 20 cases means one case is 5.00 points, but --max-drop-points is 2; in effect ANY new error fails the run. Widen the set or raise the tolerance to >= 5.00.",
+  "statistics": {
+    "method": "paired percentile bootstrap",
+    "resamples": 10000,
+    "alpha": 0.05,
+    "seed": 0
+  },
+  "require_significance": false,
+  "significance_note": null,
   "verdict": "fail"
 }
