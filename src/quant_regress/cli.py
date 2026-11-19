@@ -109,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="fail if any candidate drops more than this many points")
     p.add_argument("--strict-granularity", action="store_true",
                    help="Exit 2 when --max-drop-points is finer than one case in the eval set.")
+    p.add_argument("--require-significance", action="store_true",
+                   help="Treat a drop that is not statistically significant as PASS.")
+    p.add_argument("--summary-file", default=None,
+                   help="Append the markdown report to this path (or 'auto' for "
+                        "GITHUB_STEP_SUMMARY). Empty/unset skips.")
     p.add_argument("--min-accuracy", type=float, default=None,
                    help="fail if the BASELINE scores below this fraction "
                         "(0.5 = 50%%). Without it, a model that is wrong at every "
@@ -156,15 +161,20 @@ def build_parser() -> argparse.ArgumentParser:
 def _markdown(res) -> str:
     b = res.baseline
     lines = [
-        "| precision | accuracy | correct | drop |",
-        "|---|---|---|---|",
-        f"| {b.precision} (baseline) | {b.accuracy*100:.1f}% | {b.correct}/{b.total} | — |",
+        "| precision | accuracy | correct | drop | 95% CI (pts) |",
+        "|---|---|---|---|---|",
+        f"| {b.precision} (baseline) | {b.accuracy*100:.1f}% | {b.correct}/{b.total} | — | — |",
     ]
     for c in res.candidates:
         drop = (b.accuracy - c.accuracy) * 100.0
+        ci = res.drop_ci_for(c)
+        if ci is None:
+            ci_str = "—"
+        else:
+            ci_str = f"{ci[0]:.1f} to {ci[1]:.1f}"
         lines.append(
             f"| {c.precision} | {c.accuracy*100:.1f}% | {c.correct}/{c.total} | "
-            f"{drop:+.1f} pts |"
+            f"{drop:+.1f} pts | {ci_str} |"
         )
     for c in res.candidates:
         if c.per_category:
@@ -187,6 +197,18 @@ def _junit(res) -> ET.Element:
     """
     suite = ET.Element("testsuite", name="quant-regress")
     failures = 0
+    # Preserve any pre-existing properties element; create one only if missing.
+    props = suite.find("properties")
+    if props is None:
+        props = ET.SubElement(suite, "properties")
+    for c in res.candidates:
+        ci = res.drop_ci_for(c)
+        if ci is None:
+            val = "0.0 to 0.0"
+        else:
+            val = f"{ci[0]:.1f} to {ci[1]:.1f}"
+        ET.SubElement(props, "property",
+                      name=f"drop_ci_95_{c.precision}", value=val)
     arms = [(res.baseline.precision, res.baseline, None)]
     for c in res.candidates:
         drop = (res.baseline.accuracy - c.accuracy) * 100.0
@@ -388,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
             candidate_precisions=precisions,
             max_drop_points=args.max_drop_points,
             min_accuracy=args.min_accuracy,
+            require_significance=args.require_significance,
         )
     except (RuntimeError, ValueError) as exc:
         # ValueError covers the argument checks inside compare() -- an
@@ -398,6 +421,18 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
 
     print(_markdown(res))
+    for c in res.candidates:
+        ci = res.drop_ci_for(c)
+        if ci is None:
+            lo, hi = 0.0, 0.0
+        else:
+            lo, hi = ci
+        print(
+            f"95% CI of the drop ({c.precision}): {lo:.1f} to {hi:.1f} "
+            f"points (n={c.total}, {res.statistics['resamples']} resamples)"
+        )
+    if res.require_significance and res.significance_note:
+        print(f"note: {res.significance_note}")
     print(f"\nworst drop: {res.worst_drop_points:+.2f} pts "
           f"(threshold {args.max_drop_points:+.2f}) -> {res.verdict.value.upper()}")
     if res.min_accuracy is not None:
@@ -442,6 +477,28 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return EXIT_USAGE
+
+    # --summary-file: append the markdown report so successive runs accumulate
+    # one GitHub step summary.
+    summary_value = args.summary_file
+    summary_path = None
+    if summary_value == "auto":
+        env_val = os.environ.get("GITHUB_STEP_SUMMARY", "")
+        if env_val:
+            summary_path = env_val
+    elif summary_value:
+        summary_path = summary_value
+    if summary_path:
+        try:
+            sp = Path(summary_path)
+            sp.parent.mkdir(parents=True, exist_ok=True)
+            with open(sp, "a", encoding="utf-8") as f:
+                f.write(_markdown(res) + "\n\n")
+        except OSError as exc:
+            print(
+                f"warning: could not write step summary to {summary_path}: {exc}",
+                file=sys.stderr,
+            )
 
     return EXIT_OK if res.verdict is Verdict.PASS else EXIT_REGRESSION
 
