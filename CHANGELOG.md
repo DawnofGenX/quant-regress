@@ -4,6 +4,47 @@ All notable changes to quant-regress. This project is pre-1.0 stable in API but 
 `v1` GitHub Action tag is what users are told to pin, so **action-visible changes are
 called out here as breaking**.
 
+## 1.3.0
+
+### Added — the drop now carries an error bar
+
+The headline number was a point estimate. `+30.0 pts` on 60 cases is two wrong
+answers out of sixty, and "one case flipped" and "the quantized model cannot do
+the task" printed identically. A gate whose whole pitch is *no quiet lies about
+numbers* cannot omit the interval.
+
+- **`quant_regress.stats.paired_bootstrap_drop_ci`** — paired percentile
+  bootstrap over case identity (10 000 resamples, alpha 0.05, seeded, stdlib
+  only). Paired because both arms answer the *same* cases: resampling the two
+  arms independently would measure variance the comparison does not have.
+- **Every report carries the interval.** The text report prints
+  `95% CI of the drop (int8): 18.3 to 43.3 points (n=60, 10000 resamples)`, the
+  markdown table gains a `95% CI (pts)` column, JUnit gains a
+  `drop_ci_95_<precision>` property, and `results/*.json` gains `drop_ci_95` and
+  `drop_significant` per candidate plus a top-level `statistics` block.
+- **`--require-significance`** (Action input `require-significance`) — a drop
+  whose interval contains zero is reported as PASS with an explicit note
+  instead of as a regression. The default is unchanged: the gate still fails on
+  the point estimate, because silently ignoring a real regression is worse than
+  flagging a noisy one. Use the flag when a one-case delta should not block a
+  merge.
+- **`--summary-file`** (Action input `summary-file`, default `auto`) — appends
+  the markdown report to `$GITHUB_STEP_SUMMARY`. It appends rather than
+  overwrites so successive runs accumulate, and a write failure warns on stderr
+  without ever changing the exit code.
+
+### Changed — what the measured cases now say about the tolerance
+
+The committed 60-case runs give intervals 12-25 points wide (arithmetic int8
+drop 18.3 to 43.3 points, sentiment int8 drop 88.3 to 100.0) while the Action's
+default tolerance is 2 points. That is not a bug in the interval; it is the
+gate being honest that a 60-case set cannot resolve a 2-point effect. Read
+`--max-drop-points` as a policy threshold on the point estimate and the interval
+as the resolution you actually have.
+
+Report shape changed (markdown column, JUnit properties); exit codes and every
+existing flag are unchanged.
+
 ## 1.2.0
 
 ### Changed — the eval scenario is no longer a single 20-case arithmetic stub

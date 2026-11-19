@@ -26,15 +26,20 @@ is chosen per set, and every arm records the dtype it actually measured.
 ### Arithmetic: int8 destroys the capability
 
 <!-- claim:real-model -->
-| precision | accuracy | correct | measured dtype |
-|---|---|---|---|
-| fp32 (baseline) | 33.3% <!-- claim:real-model --> | 20/60 <!-- claim:real-model --> | torch.float32 |
-| int8 | 3.3% <!-- claim:real-model --> | 2/60 <!-- claim:real-model --> | torch.qint8 |
-| bf16 | 33.3% <!-- claim:real-model --> | 20/60 <!-- claim:real-model --> | torch.bfloat16 |
+| precision | accuracy | correct | drop | 95% CI (pts) | measured dtype | <!-- claim:real-model -->
+|---|---|---|---|---|---|
+| fp32 (baseline) | 33.3% <!-- claim:real-model --> | 20/60 <!-- claim:real-model --> | - | - | torch.float32 |
+| int8 | 3.3% <!-- claim:real-model --> | 2/60 <!-- claim:real-model --> | +30.0 pts <!-- claim:real-model --> | 18.3 to 43.3 | torch.qint8 |
+| bf16 | 33.3% <!-- claim:real-model --> | 20/60 <!-- claim:real-model --> | +0.0 pts | 0.0 to 0.0 | torch.bfloat16 |
 
 worst drop: +30.0 pts -> FAIL <!-- claim:real-model -->
 
 baseline 33.3% is above the --min-accuracy floor (0.3) <!-- claim:real-model -->
+
+The interval is what makes 30.0 points mean something: a 95% confidence interval <!-- claim:real-model -->
+of 18.3 to 43.3 points excludes zero, so this is a collapse rather than one
+unlucky case. bf16's interval of 0.0 to 0.0 is the negative control — it matches
+fp32 case for case.
 
 Read this table for the delta, not for the model. A 0.5B checkpoint is only
 partly competent at these word problems, and the tiers show how uneven that is:
@@ -55,10 +60,10 @@ column is what makes that claim checkable rather than asserted.
 ### Sentiment: a competent baseline, and the same collapse
 
 <!-- claim:real-model -->
-| precision | accuracy | correct | measured dtype |
-|---|---|---|---|
-| fp32 (baseline) | 98.3% <!-- claim:real-model --> | 59/60 <!-- claim:real-model --> | torch.float32 |
-| int8 | 3.3% <!-- claim:real-model --> | 2/60 <!-- claim:real-model --> | torch.qint8 |
+| precision | accuracy | correct | drop | 95% CI (pts) | measured dtype | <!-- claim:real-model -->
+|---|---|---|---|---|---|
+| fp32 (baseline) | 98.3% <!-- claim:real-model --> | 59/60 <!-- claim:real-model --> | - | - | torch.float32 |
+| int8 | 3.3% <!-- claim:real-model --> | 2/60 <!-- claim:real-model --> | +95.0 pts <!-- claim:real-model --> | 88.3 to 100.0 | torch.qint8 |
 
 worst drop: +95.0 pts -> FAIL <!-- claim:real-model -->
 
@@ -149,6 +154,36 @@ and the GitHub test-results pane render.
 
 `--progress-every 25` prints a progress line to **stderr** every N cases. Stdout
 stays a parseable table, so a workflow that greps the summary line is unaffected.
+
+### Is the drop real? Confidence intervals
+
+Every report carries a paired bootstrap interval on the drop, because a point
+estimate cannot distinguish "one case flipped" from "the quantized model cannot
+do the task". The text report prints one line per candidate, e.g.
+`95% CI of the drop (int8): 18.3 to 43.3 points (n=60, 10000 resamples)` <!-- claim:real-model -->
+
+The interval is in **points**, is paired on case identity (both arms answer the
+same cases, so only the flips are resampled), and is seeded, so the same run
+always prints the same bounds. Markdown gains a `95% CI (pts)` column, JUnit <!-- claim:real-model -->
+gains a `drop_ci_95_<precision>` property, and the JSON report gains
+`drop_ci_95` plus `drop_significant` per candidate.
+
+`--require-significance` changes the verdict, not the numbers: a candidate whose
+interval contains zero is reported as **PASS** with a note explaining that the
+drop is inside the sampling noise. It is off by default — silently passing a
+real regression is worse than flagging a noisy one — and it is the right flag
+when a one-case delta should not block a merge. Note what it cannot do: on a
+60-case set the interval is 10-20 points wide, so *no* tolerance below ~10
+points is resolvable. Widen the eval set for a finer judgement.
+
+### Step summaries
+
+`--summary-file PATH` appends the markdown table to `PATH`; the literal value
+`auto` means `$GITHUB_STEP_SUMMARY`, and an empty value skips. It appends rather
+than overwrites, so several runs accumulate in one job summary, and a write
+failure (read-only path, missing directory) warns on stderr while leaving the
+exit code alone. The Action exposes the same knob as the `summary-file` input,
+defaulting to `auto`.
 
 ### Matching a chatty model
 
@@ -251,6 +286,13 @@ accuracy in the report before trusting a PASS.
   CLI now warns (and exits `2` with `--strict-granularity`). Bigger sets buy
   resolution, not credibility — 600 cases resolve 0.17 points and cost ten times
   the CPU.
+- **The measured confidence intervals are 12-25 points wide, not 2.** On the
+  60-case runs above, the arithmetic int8 drop is 30.0 points with a 95% <!-- claim:real-model -->
+  interval of 18.3 to 43.3, and the sentiment drop is 95.0 with 88.3 to 100.0.
+  The Action's default `max-drop-points: 2` is therefore a *policy* threshold on
+  the point estimate — it says "any drop blocks the merge", not "I can resolve a
+  2-point effect". If you need to resolve a small delta, grow the set; no
+  statistical test recovers resolution the sample size never had.
 - **The `easy` / `medium` / `hard` tiers describe the problem, not a measured
   pass rate.** They are assigned by construction — one step, three addends or a
   division step, a distractor clause — so a weak checkpoint can score `hard`

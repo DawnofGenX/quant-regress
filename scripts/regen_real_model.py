@@ -116,13 +116,22 @@ def print_table(payload: dict) -> None:
     """
     b = payload["baseline"]
     print(f"set: {payload.get('eval', '?')} · model: {payload.get('model', '?')}")
-    print("| precision | accuracy | correct | measured dtype | seconds |")
-    print("|---|---|---|---|---|")
+    print("| precision | accuracy | correct | drop | 95% CI (pts) | measured dtype | seconds |")
+    print("|---|---|---|---|---|---|---|")
     print(f"| {b['precision']} (baseline) | {b['accuracy'] * 100:.1f}% | "
-          f"{b['correct']}/{b['total']} | {b.get('dtype') or 'n/a'} | {b['seconds']:.1f}s |")
+          f"{b['correct']}/{b['total']} | - | - | {b.get('dtype') or 'n/a'} | "
+          f"{b['seconds']:.1f}s |")
     for c in payload["candidates"]:
+        drop = (b["accuracy"] - c["accuracy"]) * 100.0
+        ci = c.get("drop_ci_95")
+        ci_str = f"{ci[0]:.1f} to {ci[1]:.1f}" if ci else "n/a"
         print(f"| {c['precision']} | {c['accuracy'] * 100:.1f}% | "
-              f"{c['correct']}/{c['total']} | {c.get('dtype') or 'n/a'} | {c['seconds']:.1f}s |")
+              f"{c['correct']}/{c['total']} | {drop:+.1f} pts | {ci_str} | "
+              f"{c.get('dtype') or 'n/a'} | {c['seconds']:.1f}s |")
+    stats = payload.get("statistics") or {}
+    if stats:
+        print(f"\n95% CI: {stats.get('method')}, {stats.get('resamples')} resamples, "
+              f"alpha {stats.get('alpha')} (paired on case identity, not on accuracy)")
     print(f"\nworst drop: {payload['worst_drop_points']:+.1f} pts -> {payload['verdict'].upper()}")
     floor = payload.get("min_accuracy")
     if floor is not None:
