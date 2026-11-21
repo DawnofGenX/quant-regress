@@ -13,6 +13,8 @@ results/*
 !results/quiet_model.json
 !results/real_model_arith.json
 !results/real_model_classify.json
+!results/lm_eval_fp32.json
+!results/lm_eval_int8.json
 
 # Secrets and local credentials — never commit these
 .env

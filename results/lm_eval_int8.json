@@ -1,0 +1,10 @@
+{
+  "task": "wikitext",
+  "precision": "int8",
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "perplexity": 243.46761065464588,
+  "num_samples": 5,
+  "measured_dtype": "torch.qint8",
+  "lm_eval_version": "0.4.13",
+  "timestamp": "2026-11-21T23:16:14.516856+00:00"
+}

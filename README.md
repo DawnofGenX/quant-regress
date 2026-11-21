@@ -3,9 +3,8 @@
 Fail CI when quantization costs you task accuracy.
 
 
-Token-level proxies — perplexity, KL divergence — routinely report that a
-quantized model is fine. Task accuracy does not, provided you actually measure
-it. This action measures a task eval at each precision and fails the build when
+Task accuracy catches quantization damage that a headline summary can hide — but do not assume token-level metrics are blind to it. An independent lm-eval baseline on Qwen/Qwen2.5-0.5B-Instruct found wikitext word perplexity rising from 17.0 (fp32) to 243.5 (dynamic int8) over 5 documents, so this checkpoint's collapse is visible at the token level too. Measure both rather than repeating the old claim that perplexity/KL "routinely" clear a quantized model; see [`docs/lm_eval_baseline.md`](docs/lm_eval_baseline.md) and the committed results under `results/`.
+This action measures a task eval at each precision and fails the build when
 accuracy drops past a threshold you set.
 
 > **If you pinned `@v1` before 2026-10-15, re-sync.** The tag has been re-pointed at least four
@@ -72,7 +71,10 @@ baseline 98.3% is above the --min-accuracy floor (0.5) <!-- claim:real-model -->
 This is the table to quote. The same checkpoint classifies 59 of 60 reviews
 correctly at fp32 and 2 of 60 at dynamic int8: the quantized model still runs,
 still returns a label, and is wrong almost every time. A token-level proxy that
-only watches the output distribution clears that; a task eval does not.
+only watches the final answer distribution may clear that; a task eval does not.
+The independent wikitext perplexity baseline in [`docs/lm_eval_baseline.md`](docs/lm_eval_baseline.md)
+does *not* clear it — perplexity rises from 17.0 to 243.5 — which is why the
+proxy's behaviour must be measured, not assumed.
 
 Regenerate everything with one command — `python scripts/regen_real_model.py`
 with no flags prints both committed runs, and `--measure` re-runs the model on
@@ -105,8 +107,11 @@ committed at [`results/int8_collapse.json`](results/int8_collapse.json).
 
 The pattern that matters in both tables: the quantized model still runs, still
 returns a valid answer, and still looks like a working model. It is simply
-wrong every time. That is why a token-level proxy can clear it and a task eval
-cannot.
+wrong every time. That is why a task eval is necessary. Whether a token-level
+proxy notices is empirical, not a slogan: this repo's independent wikitext
+perplexity baseline *does* notice this checkpoint (17.0 -> 243.5, see
+[`docs/lm_eval_baseline.md`](docs/lm_eval_baseline.md)), while an earlier claim
+that such proxies always clear a collapsed model was wrong and is retracted.
 
 ## Usage
 
